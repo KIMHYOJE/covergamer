@@ -40,6 +40,8 @@ async function boot(): Promise<void> {
   let lastPingAt = 0
   /** Smoothed one-way latency to the server, in seconds (half the ping round trip). */
   let latency = -1
+  /** When the render loop last drew a frame; a gap means the tab is not being drawn. */
+  let lastFrameAt = 0
   /** Who is holding the blast: the Space key, an on-screen button, or nobody. */
   let blastHold: 'key' | 'ui' | null = null
 
@@ -222,6 +224,7 @@ async function boot(): Promise<void> {
   const loop = new GameLoop({
     step: dt => g.step(dt),
     render: (_alpha, frameSeconds) => {
+      lastFrameAt = performance.now()
       input.update()
       // Pause toggles only between the HUD and the menu; Settings owns its own Back.
       if (input.consume('pause') && active && (ui.screen === 'hud' || ui.screen === 'menu')) ui.show(ui.screen === 'hud' ? 'menu' : 'hud')
@@ -251,6 +254,22 @@ async function boot(): Promise<void> {
     },
   })
   loop.start()
+
+  // A tab that is not on screen stops drawing frames, and the loop above stops with them: no pose, no
+  // ping. The server drops a seat that is silent for 3 s, so a player who looked away from a quiet
+  // match fell out of the round. Twice a second, while hidden, this keeps the ball rolling by the same
+  // rules and keeps publishing it, as if the tab were drawn.
+  let hiddenSince = 0
+  window.setInterval(() => {
+    const now = performance.now()
+    if (!active || !(document.hidden || now - lastFrameAt > 400)) { hiddenSince = 0; return }
+    const elapsed = hiddenSince ? Math.min((now - hiddenSince) / 1000, 1) : 0
+    hiddenSince = now
+    g.setInput(0, 0)
+    for (let t = 0; t < elapsed; t += loop.stepSeconds) g.step(loop.stepSeconds)
+    connection.poll(elapsed)
+    publish(now)
+  }, 500)
 
   new TouchControls(document.getElementById('ui')!, input, () => active && ui.screen === 'hud')
 
