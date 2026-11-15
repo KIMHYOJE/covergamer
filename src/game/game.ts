@@ -2,13 +2,13 @@ import * as THREE from 'three'
 import type { Audio } from '../engine/audio'
 import type { Renderer } from '../engine/renderer'
 import type { Quality } from '../engine/save'
-import { SEATS, type EventKind, type Hit, type Point, type Pose, type Role, type RoomState, type Rules, type Seat, type Welcome } from '../net/protocol'
+import { SEATS, type EventKind, type Hit, type Point, type Pose, type Role, type RoomState, type Rules, type Seat, type Skill, type SkillKind, type Welcome } from '../net/protocol'
 import { Arena } from './arena'
 import { BallView, RemoteTrack, SEAT_COLORS } from './balls'
 import { ArenaCamera, cameraSide } from './camera'
 import { CONFIG } from './config'
 import { Effects } from './fx'
-import { OwnBall, type Motion } from './localBall'
+import { OwnBall, SKILLS, type Motion } from './localBall'
 
 export type Mode = 'attract' | 'online'
 
@@ -22,9 +22,14 @@ export type OwnPose = { round: number; x: number; z: number; vx: number; vz: num
 /** The half of a contact that the owner of seat `to` must apply, as `main.ts` sends it. */
 export type OutgoingHit = { to: Seat; round: number; jx: number; jz: number }
 
+/** A skill this client used, as `main.ts` sends it. */
+export type OutgoingSkill = { kind: SkillKind; round: number; x: number; z: number }
+
 /** Closing speed, in metres per second, from which a contact plays sound, particles and shake. */
 const BUMP_EFFECT_SPEED = 1.5
 const BUMP_EFFECT_COOLDOWN = 0.12
+/** Closing speed from which a contact is a hard hit: heavier sound, a ring and more shake. */
+const HARD_HIT_SPEED = 6
 
 /**
  * One online match on this client. It simulates the own ball (`OwnBall`), draws every other ball
@@ -53,6 +58,9 @@ export class Game {
   private hits: OutgoingHit[] = []
   private ownFell = false
   private bumpCooldown = 0
+  private skills: OutgoingSkill[] = []
+  private readonly remoteFx = Object.fromEntries(SEATS.map(seat => [seat, { dash: 0, guard: 0 }])) as Record<Seat, { dash: number; guard: number }>
+  private readonly trailClock = Object.fromEntries(SEATS.map(seat => [seat, 0])) as Record<Seat, number>
 
   constructor(private readonly renderer: Renderer, private readonly audio: Audio, private readonly hooks: GameHooks) {
     this.arena = new Arena(renderer.shadowMapSize)
@@ -61,7 +69,7 @@ export class Game {
       this.remote[seat] = new RemoteTrack()
       this.arena.scene.add(this.balls[seat].root)
     }
-    this.arena.scene.add(this.fx.mesh)
+    this.arena.scene.add(this.fx.mesh, this.fx.rings)
   }
 
   get camera(): THREE.PerspectiveCamera {
@@ -146,7 +154,47 @@ export class Game {
     this.urgent = true
     // The impulse is half of the shared one, (1 + restitution) * closing / 2.
     const closing = (2 * Math.hypot(message.jx, message.jz)) / (1 + (this.rules?.restitution ?? 1))
-    if (closing >= BUMP_EFFECT_SPEED) this.bumpEffects(this.remote[message.seat])
+    if (closing >= BUMP_EFFECT_SPEED) this.bumpEffects(this.remote[message.seat], closing)
+  }
+
+  /** The skills this client used since the last call; send each one before the next pose. */
+  takeSkills(): OutgoingSkill[] {
+    const skills = this.skills
+    this.skills = []
+    return skills
+  }
+
+  /** Seconds until each skill is ready again, with its full cooldown, for the HUD. */
+  skillStatus(): Record<SkillKind, { left: number; total: number }> {
+    const { cooldown } = this.own
+    return {
+      dash: { left: cooldown.dash, total: SKILLS.dash.cooldown },
+      guard: { left: cooldown.guard, total: SKILLS.guard.cooldown },
+      blast: { left: cooldown.blast, total: SKILLS.blast.cooldown },
+    }
+  }
+
+  /** The player pressed a skill. Does nothing while it recharges or the ball is not in play. */
+  useSkill(kind: SkillKind): void {
+    if (this.mode !== 'online' || !this.ownsLiveBall()) return
+    const origin = this.own.use(kind)
+    if (!origin) return
+    this.urgent = true
+    this.skills.push({ kind, round: this.state!.round, ...origin })
+    this.skillEffects(this.role as Seat, kind, origin.x, origin.z, true)
+  }
+
+  /** A validated `skill` of another player: a blast may push the own ball; every kind is drawn. */
+  skill(message: Skill): void {
+    if (!this.state || message.round !== this.state.round || message.seat === this.role) return
+    if (message.kind === 'blast' && this.ownsLiveBall()) {
+      const strength = this.own.receiveBlast(message.x, message.z)
+      if (strength > 0) {
+        this.urgent = true
+        this.cam.addShake(CONFIG.look.bumpShake * (1 + 2.5 * strength))
+      }
+    }
+    this.skillEffects(message.seat, message.kind, message.x, message.z, false)
   }
 
   /** Back to the title orbit; the connection is already closed by the caller. */
@@ -187,14 +235,15 @@ export class Game {
     for (const contact of this.own.step(dt, others)) {
       this.urgent = true
       this.hits.push({ to: contact.seat, round, jx: contact.jx, jz: contact.jz })
-      if (contact.closing >= BUMP_EFFECT_SPEED) this.bumpEffects(this.remote[contact.seat])
+      if (contact.closing >= BUMP_EFFECT_SPEED) this.bumpEffects(this.remote[contact.seat], contact.closing)
     }
     if (this.own.out && !wasOut) {
       // Optimistic: fall at once; the server's ring-out event confirms it and scores the round.
       this.urgent = true
       this.ownFell = true
       this.audio.play('fall')
-      this.fx.burst(new THREE.Vector3(this.own.x, 0.5, this.own.z), SEAT_COLORS[this.role as Seat], 30, 7)
+      this.fx.burst(new THREE.Vector3(this.own.x, 0.5, this.own.z), SEAT_COLORS[this.role as Seat], 46, 9)
+      this.fx.shockwave(this.own.x, this.own.z, SEAT_COLORS[this.role as Seat], 3.2, 0.7)
     }
   }
 
@@ -222,6 +271,7 @@ export class Game {
         // Fall as soon as the owner's report crosses the edge; the server confirms with `out`.
         const out = seatState.out || (mine ? this.own.out : this.remote[seat].reportedOutside(radius))
         this.balls[seat].update(ball.x, ball.z, ball.vx, ball.vz, out, frameSeconds, this.time)
+        this.ballEffects(seat, mine, ball, out, frameSeconds)
         if (mine && seatState.playing) own = ball
       }
       this.cam.update(own, frameSeconds, this.reducedMotion)
@@ -249,14 +299,69 @@ export class Game {
     this.urgent = false
     this.hits = []
     this.ownFell = false
+    this.skills = []
+    for (const seat of SEATS) Object.assign(this.remoteFx[seat], { dash: 0, guard: 0 })
   }
 
-  private bumpEffects(other: Motion): void {
+  /** Bump sparks grow with the closing speed; a hard hit adds a ring, a deeper sound and more shake. */
+  private bumpEffects(other: Motion, closing: number): void {
     if (this.bumpCooldown > 0) return
     this.bumpCooldown = BUMP_EFFECT_COOLDOWN
-    this.audio.play('bump')
-    this.fx.burst(new THREE.Vector3((this.own.x + other.x) / 2, 0.8, (this.own.z + other.z) / 2), '#ffffff', 16, 5)
-    this.cam.addShake(CONFIG.look.bumpShake)
+    const at = new THREE.Vector3((this.own.x + other.x) / 2, 0.8, (this.own.z + other.z) / 2)
+    const hard = closing >= HARD_HIT_SPEED
+    this.audio.play(hard ? 'hard' : 'bump')
+    this.fx.burst(at, '#ffffff', Math.round(14 + closing * 3), 5 + closing * 0.7)
+    if (hard) {
+      this.fx.burst(at, '#ffd04a', 16, 9)
+      this.fx.shockwave(at.x, at.z, '#ffffff', 1.4 + closing * 0.18, 0.4)
+    }
+    this.cam.addShake(CONFIG.look.bumpShake * (0.6 + Math.min(closing, 14) / 7))
+  }
+
+  /** Sound, particles and rings for a skill; `mine` adds camera shake for the own ball's skills. */
+  private skillEffects(seat: Seat, kind: SkillKind, x: number, z: number, mine: boolean): void {
+    const color = SEAT_COLORS[seat]
+    const at = new THREE.Vector3(x, 0.6, z)
+    if (kind === 'dash') {
+      this.audio.play('dash')
+      this.fx.burst(at, '#ffffff', 18, 7)
+      this.fx.shockwave(x, z, color, 1.8, 0.35)
+      if (!mine) this.remoteFx[seat].dash = SKILLS.dash.duration
+      else this.cam.addShake(CONFIG.look.bumpShake * 0.8)
+    } else if (kind === 'guard') {
+      this.audio.play('guard')
+      this.fx.burst(at, '#9fe8ff', 20, 5)
+      this.fx.shockwave(x, z, '#9fe8ff', 2.2, 0.5)
+      if (!mine) this.remoteFx[seat].guard = SKILLS.guard.duration
+    } else {
+      this.audio.play('blast')
+      this.fx.radial(at, color, 48, 13)
+      this.fx.burst(at, '#ffffff', 28, 10)
+      this.fx.burst(new THREE.Vector3(x, 1.2, z), '#ffd04a', 22, 8)
+      this.fx.shockwave(x, z, color, SKILLS.blast.radius, 0.6)
+      this.fx.shockwave(x, z, '#ffffff', SKILLS.blast.radius * 0.7, 0.4)
+      this.cam.addShake(CONFIG.look.bumpShake * (mine ? 3 : 1.6))
+    }
+  }
+
+  /** Dash glow, guard bubble and a speed trail behind a fast ball. */
+  private ballEffects(seat: Seat, mine: boolean, ball: Motion, out: boolean, dt: number): void {
+    const timers = this.remoteFx[seat]
+    if (!mine) {
+      timers.dash = Math.max(0, timers.dash - dt)
+      timers.guard = Math.max(0, timers.guard - dt)
+    }
+    const dashing = mine ? this.own.dashLeft > 0 : timers.dash > 0
+    const guarding = mine ? this.own.guardLeft > 0 : timers.guard > 0
+    this.balls[seat].setState(dashing, guarding)
+    this.trailClock[seat] -= dt
+    if (out || this.trailClock[seat] > 0) return
+    const speed = Math.hypot(ball.vx, ball.vz)
+    if (!dashing && speed < 4.5) return
+    this.trailClock[seat] = dashing ? 0.012 : 0.035
+    const radius = this.rules?.ball_radius ?? 0.8
+    const behind = new THREE.Vector3(ball.x - ball.vx * 0.03, radius * 0.9, ball.z - ball.vz * 0.03)
+    this.fx.trail(behind, dashing ? '#ffffff' : SEAT_COLORS[seat], dashing ? 1.7 : 0.9 + Math.min(speed, 12) / 24)
   }
 
   private countdownBeep(state: RoomState): void {
@@ -272,7 +377,8 @@ export class Game {
     } else if (kind === 'ringout' && seat && seat !== this.role) {
       const ball = this.remote[seat]
       this.audio.play('fall')
-      this.fx.burst(new THREE.Vector3(ball.x, 0.5, ball.z), SEAT_COLORS[seat], 30, 7)
+      this.fx.burst(new THREE.Vector3(ball.x, 0.5, ball.z), SEAT_COLORS[seat], 46, 9)
+      this.fx.shockwave(ball.x, ball.z, SEAT_COLORS[seat], 3.2, 0.7)
     } else if (kind === 'ringout' && seat === this.role && !this.ownFell) {
       // The server saw the own ball cross before this client did (for example after a reconnect).
       this.audio.play('fall')

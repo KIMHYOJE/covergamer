@@ -3,7 +3,7 @@ import type { I18n } from '../engine/i18n'
 import type { Input } from '../engine/input'
 import type { Locale, Quality, SaveData, SaveStore } from '../engine/save'
 import { SEAT_COLORS } from '../game/balls'
-import { sanitizeRoom, SEATS, type Role, type RoomState, type Seat } from '../net/protocol'
+import { sanitizeRoom, SEATS, type Role, type RoomState, type Seat, type SkillKind } from '../net/protocol'
 
 export type Screen = 'boot' | 'title' | 'hud' | 'menu' | 'settings'
 /** Connection status shown before the first snapshot or when the service is not usable. */
@@ -15,6 +15,8 @@ export type UiActions = {
   menu(open: boolean): void
   leave(): void
   invite(): void
+  /** A skill button was pressed (touch or mouse). */
+  skill(kind: SkillKind): void
   settings(patch: Partial<SaveData>): void
 }
 
@@ -56,6 +58,13 @@ export class Ui {
     this.root = document.getElementById('ui')!
     this.root.innerHTML = this.template()
     this.root.addEventListener('click', e => this.onClick(e))
+    // Skill buttons act on press, not release, so a tap in the middle of a fight lands at once.
+    this.root.addEventListener('pointerdown', e => {
+      const button = (e.target as HTMLElement).closest<HTMLElement>('[data-skill]')
+      if (!button || this.screen !== 'hud') return
+      e.preventDefault()
+      this.actions.skill(button.dataset.skill as SkillKind)
+    })
     this.root.addEventListener('input', e => this.onInput(e))
     this.root.addEventListener('focusin', e => {
       if ((e.target as HTMLElement).matches('.btn, .seg button, .toggle')) this.audio.play('ui')
@@ -164,6 +173,19 @@ export class Ui {
     this.q('.hud-banner').classList.toggle('is-active', banner !== '')
     const showHint = role !== 'spectator' && view.status === 'online' && (!state || state.phase === 'waiting' || state.phase === 'countdown')
     this.q('.hint').classList.toggle('is-active', showHint)
+  }
+
+  /** Cooldown fill and countdown on the three skill buttons. `show`: the player has a ball this round. */
+  updateSkills(status: Record<SkillKind, { left: number; total: number }>, show: boolean): void {
+    this.q('.skills').classList.toggle('is-active', show)
+    if (!show) return
+    for (const kind of ['dash', 'guard', 'blast'] as const) {
+      const { left, total } = status[kind]
+      const button = this.q(`[data-skill="${kind}"]`)
+      button.style.setProperty('--cd', String(Math.min(1, left / total)))
+      button.classList.toggle('is-ready', left <= 0)
+      this.set(`skill-${kind}`, left > 0 ? String(Math.ceil(left)) : '')
+    }
   }
 
   private renderHint(): void {
@@ -408,6 +430,11 @@ export class Ui {
   </div>
   <div class="hud-banner"><b data-slot="banner"></b><span data-slot="banner-sub"></span></div>
   <div class="hint"><span></span></div>
+  <div class="skills">
+    <button class="skill" data-skill="dash" tabindex="-1"><kbd>F</kbd><b data-i18n="skill.dash"></b><em data-slot="skill-dash"></em></button>
+    <button class="skill" data-skill="guard" tabindex="-1"><kbd>E</kbd><b data-i18n="skill.guard"></b><em data-slot="skill-guard"></em></button>
+    <button class="skill" data-skill="blast" tabindex="-1"><kbd>Space</kbd><b data-i18n="skill.blast"></b><em data-slot="skill-blast"></em></button>
+  </div>
   <div class="touch">
     <div class="touch-stick"><i></i></div>
   </div>

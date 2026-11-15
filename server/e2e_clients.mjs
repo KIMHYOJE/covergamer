@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 
-const MARKER = 'ring-out-v2';
+const MARKER = 'ring-out-v3';
 const base = process.argv.slice(2).find(arg => arg !== '--') || process.env.RING_OUT_WS_URL || 'ws://127.0.0.1:8787/ws';
 const room = (process.env.RING_OUT_TEST_ROOM || `E2E${Date.now().toString(36)}`).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-8).padStart(4, 'E');
 const healthUrl = base.replace(/^ws/, 'http').replace(/\/ws(?:\?.*)?$/, '/healthz');

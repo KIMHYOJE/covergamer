@@ -98,6 +98,10 @@ export class BallView {
   private readonly mesh: THREE.Mesh
   private readonly shadow: THREE.Mesh
   private readonly marker: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
+  private readonly body: THREE.MeshStandardMaterial
+  private readonly bubble: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
+  private dashing = false
+  private guarding = false
   private radius = 0.8
   private y = 0
   private fallSpeed = 0
@@ -107,8 +111,11 @@ export class BallView {
   private readonly spin = new THREE.Quaternion()
 
   constructor(color: string) {
-    this.mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24),
-      new THREE.MeshStandardMaterial({ map: ballTexture(color), roughness: 0.35, metalness: 0.1 }))
+    this.body = new THREE.MeshStandardMaterial({ map: ballTexture(color), roughness: 0.35, metalness: 0.1, emissive: new THREE.Color(color), emissiveIntensity: 0 })
+    this.mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), this.body)
+    this.bubble = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16),
+      new THREE.MeshBasicMaterial({ color: '#9fe8ff', transparent: true, opacity: 0.3, depthWrite: false, toneMapped: false, blending: THREE.AdditiveBlending }))
+    this.bubble.visible = false
     this.mesh.castShadow = true
     this.shadow = new THREE.Mesh(new THREE.CircleGeometry(1, 32),
       new THREE.MeshBasicMaterial({ color: '#000000', transparent: true, opacity: 0.35, depthWrite: false }))
@@ -117,7 +124,7 @@ export class BallView {
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false, toneMapped: false }))
     this.marker.rotation.x = -Math.PI / 2
     this.marker.visible = false
-    this.root.add(this.mesh, this.shadow, this.marker)
+    this.root.add(this.mesh, this.shadow, this.marker, this.bubble)
     this.setRadius(0.8)
   }
 
@@ -126,6 +133,12 @@ export class BallView {
     this.mesh.scale.setScalar(radius)
     this.shadow.scale.setScalar(radius * 0.95)
     this.marker.scale.setScalar(radius)
+  }
+
+  /** Dash glow and guard bubble, from this client's own skills or a rival's announced ones. */
+  setState(dashing: boolean, guarding: boolean): void {
+    this.dashing = dashing
+    this.guarding = guarding
   }
 
   setOwn(own: boolean): void {
@@ -155,6 +168,13 @@ export class BallView {
     this.shadow.position.y = 0.01
     this.shadow.visible = !this.falling
     this.marker.position.y = 0.02
+    this.body.emissiveIntensity = this.dashing ? 0.9 + Math.sin(time * 40) * 0.2 : this.guarding ? 0.25 : 0
+    this.bubble.visible = this.guarding && !this.falling
+    if (this.bubble.visible) {
+      this.bubble.position.y = this.mesh.position.y
+      this.bubble.scale.setScalar(this.radius * (1.45 + Math.sin(time * 9) * 0.06))
+      this.bubble.material.opacity = 0.28 + Math.sin(time * 7) * 0.08
+    }
     this.marker.material.opacity = 0.55 + Math.sin(time * 5) * 0.3
     const speed = Math.hypot(vx, vz)
     if (speed > 1e-3) {

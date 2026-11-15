@@ -8,7 +8,7 @@ import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
-const MARKER = 'ring-out-v2';
+const MARKER = 'ring-out-v3';
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
 const STATIC_ROOT = resolve(process.env.STATIC_ROOT || join(dirname(fileURLToPath(import.meta.url)), '../dist'));
@@ -21,8 +21,8 @@ const ROOM_IDLE_MS = 10 * 60_000;
 // runs the same movement and contact code with them (src/game/localBall.ts).
 const ARENA_RADIUS = 10;
 const BALL_RADIUS = 0.8;
-const ACCEL = 16;
-const DAMPING = 1.1;
+const ACCEL = 13;
+const DAMPING = 0.55;
 const MAX_SPEED = 9;
 const RESTITUTION = 0.95;
 const SPAWN_DISTANCE = 4;
@@ -54,6 +54,11 @@ const RING_OUT_GRACE_MS = 250;
 // once per pair in this interval (clients send one per pair per `HIT_WINDOW`, at least 250 ms).
 const HIT_REACH_SLACK = 1;
 const HIT_MIN_INTERVAL_MS = 150;
+// Skills are announced by their owner: the room checks phase, seat state, a per-kind cooldown (shorter
+// than the client's, so latency never drops a real use) and that the origin is where the ball is, then
+// relays them. Each client decides for its own ball whether a blast reaches it.
+const SKILL_COOLDOWN_MS = { dash: 1500, guard: 4000, blast: 4000 };
+const SKILL_REACH_SLACK = 1.5;
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -102,7 +107,7 @@ function send(ws, payload) {
 function emptySeat() {
   // `playing`: took part when the current round went live. `out`: left the arena or the room this round.
   // `poseAt`: when the last pose arrived (or the round went live). `hitAt`: last relayed hit per target.
-  return { token: '', socket: null, disconnectedAt: 0, score: 0, playing: false, out: false, poseSeq: 0, pose: null, poseAt: 0, hitAt: {} };
+  return { token: '', socket: null, disconnectedAt: 0, score: 0, playing: false, out: false, poseSeq: 0, pose: null, poseAt: 0, hitAt: {}, skillAt: {} };
 }
 
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -275,6 +280,28 @@ class Room {
     return Math.hypot(from.x - to.x, from.z - to.z) <= 2 * BALL_RADIUS + HIT_REACH_SLACK + from.travel + to.travel;
   }
 
+  /** Relays a skill (dash, guard, blast) to every other player and spectator. */
+  skill(side, message) {
+    const seat = this.seats[side];
+    if (this.phase !== 'live' || !seat.playing || seat.out || message.round !== this.round) return;
+    const kind = message.kind;
+    if (typeof kind !== 'string' || !Object.hasOwn(SKILL_COOLDOWN_MS, kind)) return;
+    const { x, z } = message;
+    if (![x, z].every(finite) || Math.hypot(x, z) > POSE_POSITION_LIMIT) return;
+    const now = Date.now();
+    if (now - (seat.skillAt[kind] || 0) < SKILL_COOLDOWN_MS[kind]) return;
+    const pose = seat.pose || { ...SPAWN[side], vx: 0, vz: 0, lat: 0 };
+    const travel = Math.hypot(pose.vx, pose.vz) * (Math.min(now - seat.poseAt, MAX_LATENCY_MS) + pose.lat) / 1000;
+    if (Math.hypot(x - pose.x, z - pose.z) > SKILL_REACH_SLACK + travel) return;
+    seat.skillAt[kind] = now;
+    this.lastActivity = now;
+    const text = JSON.stringify({ type: 'skill', marker: MARKER, room: this.code, seat: side, kind, round: this.round, x, z });
+    for (const other of SEATS) {
+      if (other !== side && this.connected(other)) sendText(this.seats[other].socket, text);
+    }
+    for (const socket of this.observers) sendText(socket, text);
+  }
+
   poseMessage(side, pose) {
     return { type: 'pose', marker: MARKER, room: this.code, seat: side, round: this.round, ...pose };
   }
@@ -301,7 +328,7 @@ class Room {
 
   startRound(now) {
     this.round += 1;
-    for (const side of SEATS) Object.assign(this.seats[side], { playing: false, out: false, pose: null, poseAt: 0, hitAt: {} });
+    for (const side of SEATS) Object.assign(this.seats[side], { playing: false, out: false, pose: null, poseAt: 0, hitAt: {}, skillAt: {} });
     this.setPhase('countdown', COUNTDOWN_MS, now);
   }
 
@@ -476,6 +503,7 @@ websocketServer.on('connection', (ws, _request, roomCode, resumeToken) => {
       const message = JSON.parse(data.toString());
       if (message?.type === 'pose' && room.seats[ws.role]?.socket === ws) room.pose(ws.role, message);
       else if (message?.type === 'hit' && room.seats[ws.role]?.socket === ws) room.hit(ws.role, message);
+      else if (message?.type === 'skill' && room.seats[ws.role]?.socket === ws) room.skill(ws.role, message);
       // Clients measure their latency with this echo; it also keeps their idle timer fed.
       else if (message?.type === 'ping' && Number.isSafeInteger(message.t) && message.t >= 0) send(ws, { type: 'pong', marker: MARKER, room: room.code, t: message.t });
     } catch {

@@ -1,4 +1,4 @@
-import type { Rules, Seat } from '../net/protocol'
+import type { Rules, Seat, SkillKind } from '../net/protocol'
 
 /** A ball on the arena floor: position in metres, velocity in metres per second. */
 export type Motion = { x: number; z: number; vx: number; vz: number }
@@ -14,6 +14,22 @@ const MAX_STEP = 0.05
  * for each pair to twice the measured one-way delay between the two clients.
  */
 export const HIT_WINDOW = 0.25
+
+/**
+ * Skills of the own ball. Cooldowns, in seconds, stay above the server's (1.5, 4, 4) so a real use
+ * is never dropped. A dash adds speed and lifts the speed cap for `duration`; a guard softens every
+ * impulse the ball receives; a blast pushes the balls within `radius` of the ball, each client applying
+ * it to its own ball.
+ */
+export const SKILLS = {
+  dash: { cooldown: 2.5, duration: 0.32, kick: 12, capScale: 1.8 },
+  guard: { cooldown: 6, duration: 1.3, soften: 0.25 },
+  blast: { cooldown: 7, radius: 5.5, power: 15, recoil: 3, firstCooldown: 3 },
+} as const
+/** Speed above the normal cap (after a bump or blast) fades at this rate per second. */
+const OVERSPEED_DECAY = 2.6
+/** No ball ever reports more than this multiple of `max_speed`; the server drops poses above twice it. */
+const ABSOLUTE_SPEED = 1.9
 
 /**
  * The player's own ball. This client owns its movement: it applies input, resolves contacts with
@@ -35,9 +51,13 @@ export class OwnBall implements Motion {
    * it publishes stays outside until the server confirms; `BallView` draws the fall.
    */
   out = false
-  private rules: Rules = { arena_radius: 10, ball_radius: 0.8, accel: 16, damping: 1.1, max_speed: 9, restitution: 0.95, win_score: 3 }
+  private rules: Rules = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3 }
   private inputX = 0
   private inputZ = 0
+  /** Seconds left of a dash and of a guard, and until each skill is ready again. */
+  dashLeft = 0
+  guardLeft = 0
+  readonly cooldown: Record<SkillKind, number> = { dash: 0, guard: 0, blast: 0 }
   /** Seconds of simulated time; the clock for `HIT_WINDOW`. */
   private clock = 0
   /** When this client last resolved a contact with each seat, and when it last sent one. */
@@ -52,7 +72,8 @@ export class OwnBall implements Motion {
 
   /** Holds the ball still at `x`, `z` (spawn before each round). */
   place(x: number, z: number): void {
-    Object.assign(this, { x, z, vx: 0, vz: 0, out: false })
+    Object.assign(this, { x, z, vx: 0, vz: 0, out: false, dashLeft: 0, guardLeft: 0 })
+    Object.assign(this.cooldown, { dash: 0, guard: 0, blast: SKILLS.blast.firstCooldown })
     this.resolved.clear()
     this.sent.clear()
   }
@@ -71,14 +92,20 @@ export class OwnBall implements Motion {
   step(seconds: number, others: readonly { seat: Seat; ball: Motion }[]): Contact[] {
     const dt = Math.min(Math.max(seconds, 0), MAX_STEP)
     this.clock += dt
+    for (const kind of Object.keys(this.cooldown) as SkillKind[]) this.cooldown[kind] = Math.max(0, this.cooldown[kind] - dt)
+    this.dashLeft = Math.max(0, this.dashLeft - dt)
+    this.guardLeft = Math.max(0, this.guardLeft - dt)
     if (this.out) return []
-    integrate(this, this.inputX, this.inputZ, dt, this.rules)
+    const cap = this.rules.max_speed * (this.dashLeft > 0 ? SKILLS.dash.capScale : 1)
+    integrate(this, this.inputX, this.inputZ, dt, this.rules, cap)
+    this.limit()
     const contacts: Contact[] = []
     for (const { seat, ball } of others) {
       const contact = touch(this, ball, this.rules)
       // Inside the window this pair already has its impulse: only keep the balls apart.
       if (!contact || this.recent(this.resolved, seat)) continue
-      const impulse = ((1 + this.rules.restitution) * contact.closing) / 2
+      // Capped: the server drops a hit above twice the top speed.
+      const impulse = Math.min(((1 + this.rules.restitution) * contact.closing) / 2, this.rules.max_speed * 1.9)
       this.vx += impulse * contact.nx
       this.vz += impulse * contact.nz
       this.resolved.set(seat, this.clock)
@@ -94,10 +121,67 @@ export class OwnBall implements Motion {
   receiveHit(seat: Seat, jx: number, jz: number): boolean {
     // Both owners detected this contact, and each already applied its own half.
     if (this.out || this.recent(this.sent, seat)) return false
-    this.vx += jx
-    this.vz += jz
+    const soften = this.guardLeft > 0 ? SKILLS.guard.soften : 1
+    this.vx += jx * soften
+    this.vz += jz * soften
+    this.limit()
     this.resolved.set(seat, this.clock)
     return true
+  }
+
+  /**
+   * Starts a skill if it is ready and the ball is in play. Returns where it was used (the origin the
+   * game announces), or null. A dash needs a direction: the stick, else the current motion.
+   */
+  use(kind: SkillKind): { x: number; z: number } | null {
+    if (this.out || this.cooldown[kind] > 0) return null
+    if (kind === 'dash') {
+      let dx = this.inputX
+      let dz = this.inputZ
+      if (Math.hypot(dx, dz) < 0.2) { dx = this.vx; dz = this.vz }
+      const length = Math.hypot(dx, dz)
+      if (length < 0.2) return null
+      this.vx += (dx / length) * SKILLS.dash.kick
+      this.vz += (dz / length) * SKILLS.dash.kick
+      this.dashLeft = SKILLS.dash.duration
+      this.limit(SKILLS.dash.capScale + 0.1)
+    } else if (kind === 'guard') {
+      this.guardLeft = SKILLS.guard.duration
+    } else {
+      // The caster is thrown back a little, against its own motion.
+      const speed = Math.hypot(this.vx, this.vz)
+      if (speed > 0.5) { this.vx -= (this.vx / speed) * SKILLS.blast.recoil; this.vz -= (this.vz / speed) * SKILLS.blast.recoil }
+    }
+    this.cooldown[kind] = SKILLS[kind].cooldown
+    return { x: this.x, z: this.z }
+  }
+
+  /**
+   * A blast at `ox`, `oz`: pushes this ball away from that point when it is within the radius, with
+   * full power at the centre fading to 40% at the rim. Returns the push strength in 0..1, or 0.
+   */
+  receiveBlast(ox: number, oz: number): number {
+    if (this.out) return 0
+    const dx = this.x - ox
+    const dz = this.z - oz
+    const distance = Math.hypot(dx, dz)
+    const { radius, power } = SKILLS.blast
+    if (distance > radius) return 0
+    const strength = 1 - 0.6 * (distance / radius)
+    const nx = distance > 1e-3 ? dx / distance : 0
+    const nz = distance > 1e-3 ? dz / distance : 1
+    const soften = this.guardLeft > 0 ? SKILLS.guard.soften : 1
+    this.vx += nx * power * strength * soften
+    this.vz += nz * power * strength * soften
+    this.limit()
+    return strength * soften
+  }
+
+  /** Keeps the ball under the absolute speed limit the server relays. */
+  private limit(scale = ABSOLUTE_SPEED): void {
+    const max = this.rules.max_speed * scale
+    const speed = Math.hypot(this.vx, this.vz)
+    if (speed > max) { this.vx *= max / speed; this.vz *= max / speed }
   }
 
   private recent(times: Map<Seat, number>, seat: Seat): boolean {
@@ -107,16 +191,18 @@ export class OwnBall implements Motion {
 }
 
 /** Input acceleration, damping, speed cap and movement for one step. */
-export function integrate(ball: Motion, inputX: number, inputZ: number, dt: number, rules: Rules): void {
+export function integrate(ball: Motion, inputX: number, inputZ: number, dt: number, rules: Rules, cap = rules.max_speed): void {
   ball.vx += inputX * rules.accel * dt
   ball.vz += inputZ * rules.accel * dt
   const keep = Math.exp(-rules.damping * dt)
   ball.vx *= keep
   ball.vz *= keep
   const speed = Math.hypot(ball.vx, ball.vz)
-  if (speed > rules.max_speed) {
-    ball.vx *= rules.max_speed / speed
-    ball.vz *= rules.max_speed / speed
+  if (speed > cap) {
+    // Above the cap (after a bump, dash or blast) the excess fades instead of snapping away.
+    const kept = cap + (speed - cap) * Math.exp(-OVERSPEED_DECAY * dt)
+    ball.vx *= kept / speed
+    ball.vz *= kept / speed
   }
   ball.x += ball.vx * dt
   ball.z += ball.vz * dt

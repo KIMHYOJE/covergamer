@@ -42,7 +42,7 @@
   "status.lost": "你输了",
   "status.wins": "{player} 获胜",
   "status.rematch": "{s} 秒后再战",
-  "hint.move": "{keys} 滚动。把对手挤出边缘！",
+  "hint.move": "{keys} 滚动 · 空格 爆破 · F 冲刺 · E 护盾，把对手撞出场外！",
   "hint.move.touch": "在屏幕任意位置拖动来滚动。把对手挤出边缘！",
   "settings.title": "设置",
   "settings.audio": "声音",
@@ -58,5 +58,8 @@
   "settings.language": "语言",
   "settings.on": "开",
   "settings.off": "关",
-  "credits.fonts": "字体：ManusCC0、ManusCC0 Sans CJK SC（CC0 1.0）"
+  "credits.fonts": "字体：ManusCC0、ManusCC0 Sans CJK SC（CC0 1.0）",
+  "skill.dash": "冲刺",
+  "skill.guard": "护盾",
+  "skill.blast": "爆破"
 }

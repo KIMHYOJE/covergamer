@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "build": "ring-out-v2",
+  "build": "ring-out-v3",
   "signalingUrl": "wss://covergamer.onrender.com/ws",
   "iceTransportPolicy": "all"
 }

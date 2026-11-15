@@ -109,6 +109,8 @@ async function boot(): Promise<void> {
       g.pose(message, Math.max(latency, 0), performance.now())
     } else if (message.type === 'hit') {
       g.hit(message)
+    } else if (message.type === 'skill') {
+      g.skill(message)
     } else if (message.type === 'pong') {
       const sample = (performance.now() - message.t) / 2000
       if (sample >= 0 && sample <= MAX_LATENCY_MS / 1000) latency = latency < 0 ? sample : latency + (sample - latency) * 0.2
@@ -121,6 +123,7 @@ async function boot(): Promise<void> {
     if (nowMs - lastPingAt >= PING_INTERVAL_MS && connection.send(JSON.stringify({ type: 'ping', t: Math.floor(nowMs) }))) lastPingAt = nowMs
     // A contact goes out at once: the other owner applies its half when this arrives.
     for (const hit of g.takeHits()) connection.send(JSON.stringify({ type: 'hit', ...hit }))
+    for (const skill of g.takeSkills()) connection.send(JSON.stringify({ type: 'skill', ...skill }))
     const pose = g.ownPose()
     if (!pose || nowMs - lastPoseAt < (pose.urgent ? POSE_URGENT_MS : POSE_INTERVAL_MS)) return
     const seq = poseSeq + 1
@@ -160,6 +163,7 @@ async function boot(): Promise<void> {
       game?.leave()
       ui.show('title')
     },
+    skill: kind => game?.useSkill(kind),
     invite: () => {
       const url = inviteUrl(room)
       navigator.clipboard?.writeText(url).then(() => ui.copied(), () => window.prompt(i18n.t('hud.invite'), url))
@@ -218,9 +222,18 @@ async function boot(): Promise<void> {
       // The menu does not pause the match, but it releases the stick.
       const stick = ui.screen === 'hud' ? stickToWorld(g.side, input.move.x, input.move.y) : { x: 0, z: 0 }
       g.setInput(stick.x, stick.z)
+      // Skills: Space = blast, F or left click = dash, E = guard (on screen: the three buttons).
+      if (ui.screen === 'hud') {
+        if (input.consume('jump')) g.useSkill('blast')
+        if (input.consume('dash')) g.useSkill('dash')
+        if (input.consume('interact')) g.useSkill('guard')
+      }
       publish(performance.now())
       g.render(frameSeconds)
-      if (active) ui.updateHud({ room, role: g.role, status, state: g.state, phaseSeconds: g.phaseSeconds() })
+      if (active) {
+        ui.updateHud({ room, role: g.role, status, state: g.state, phaseSeconds: g.phaseSeconds() })
+        ui.updateSkills(g.skillStatus(), g.role !== 'spectator' && (g.state?.phase === 'live' || g.state?.phase === 'countdown'))
+      }
       input.endFrame()
     },
   })

@@ -4,7 +4,7 @@
  * scores, and decides every ring-out. The client validates everything it receives before the game
  * reads it.
  */
-export const BUILD = 'ring-out-v2'
+export const BUILD = 'ring-out-v3'
 export const MAX_MESSAGE_BYTES = 4096
 
 export type Seat = 'p1' | 'p2' | 'p3' | 'p4'
@@ -26,14 +26,18 @@ export type RoomState = {
 export type Pose = { type: 'pose'; marker: string; room: string; seat: Seat; round: number; seq: number; x: number; z: number; vx: number; vz: number; lat: number }
 /** `seat` bumped this client's ball and sends this ball's half of the contact impulse. */
 export type Hit = { type: 'hit'; marker: string; room: string; seat: Seat; round: number; jx: number; jz: number }
+export type SkillKind = 'dash' | 'guard' | 'blast'
+export const SKILL_KINDS: readonly SkillKind[] = ['dash', 'guard', 'blast']
+/** `seat` used a skill at `x`, `z`. A blast pushes every ball near that point; the others are visual. */
+export type Skill = { type: 'skill'; marker: string; room: string; seat: Seat; kind: SkillKind; round: number; x: number; z: number }
 export type Pong = { type: 'pong'; marker: string; room: string; t: number }
 export type ServiceError = { type: 'error'; marker: string; room: string; code: 'invalid_message' }
-export type Message = Welcome | RoomState | Pose | Hit | Pong | ServiceError
+export type Message = Welcome | RoomState | Pose | Hit | Skill | Pong | ServiceError
 
 export const SEATS: readonly Seat[] = ['p1', 'p2', 'p3', 'p4']
 const PHASES: readonly string[] = ['waiting', 'countdown', 'live', 'point', 'ended']
 const EVENTS: readonly string[] = ['', 'round', 'ringout', 'point', 'match']
-const TYPES: readonly string[] = ['welcome', 'room', 'pose', 'hit', 'pong', 'error']
+const TYPES: readonly string[] = ['welcome', 'room', 'pose', 'hit', 'skill', 'pong', 'error']
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const POSITION_LIMIT = 100
 const SPEED_LIMIT = 100
@@ -112,6 +116,9 @@ export function decode(text: string, room: string, lastSeq: number): Message | n
   }
   if (raw.type === 'hit') {
     return isSeat(raw.seat) && isUint(raw.round) && within(raw.jx, SPEED_LIMIT) && within(raw.jz, SPEED_LIMIT) ? (raw as Hit) : null
+  }
+  if (raw.type === 'skill') {
+    return isSeat(raw.seat) && SKILL_KINDS.includes(raw.kind as SkillKind) && isUint(raw.round) && within(raw.x, POSITION_LIMIT) && within(raw.z, POSITION_LIMIT) ? (raw as Skill) : null
   }
   if (!isUint(raw.seq) || raw.seq <= lastSeq || !isUint(raw.round) || !PHASES.includes(raw.phase as string) || !isUint(raw.phase_ends_in_ms)) return null
   const { seats, event } = raw

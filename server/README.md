@@ -14,7 +14,7 @@ and acceptance are owned by the Game Skill's shared multiplayer guide (`game-mul
 - `GET /healthz` reports process availability. `/ws?room=ABCD` connects a client. Room codes are 4–8
   ASCII letters/digits and public invitations; this reference does not implement private rooms.
 
-## Protocol: ring-out-v2
+## Protocol: ring-out-v3
 
 This service does no physics. Each client simulates its own ball and publishes it. The service
 relays poses and contacts, and it alone decides rounds, ring-outs, points and the match winner.

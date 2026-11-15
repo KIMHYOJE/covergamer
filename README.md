@@ -53,7 +53,7 @@ Skill's shared multiplayer guide (`game-multiplayer.md`) owns hosting and accept
 3. Build and publish the client, then test with two browsers on the published URL.
 
 `build` in `bootstrap.json` and `BUILD` in `src/net/protocol.ts` must equal the server's `MARKER`
-(`ring-out-v2`). Change all three together when the protocol changes, and deploy the matching
+(`ring-out-v3`). Change all three together when the protocol changes, and deploy the matching
 server and client together.
 
 ## Layout
@@ -61,7 +61,7 @@ server and client together.
 | Path | Role | Change it? |
 | --- | --- | --- |
 | `server/authoritative_server.mjs` | Rooms, seats, pose and hit relay, referee, rules | Yes: outcome rules live here |
-| `src/net/protocol.ts` | `ring-out-v2` message types and strict decoding | When the protocol changes |
+| `src/net/protocol.ts` | `ring-out-v3` message types and strict decoding | When the protocol changes |
 | `src/net/connection.ts` | Bootstrap fetch, socket lifecycle, retry | Rarely |
 | `src/net/session.ts` | Room code, `?room=` invite link, per-tab resume token | Rarely |
 | `src/game/localBall.ts` | `OwnBall`: input, movement and contacts of the own ball | Yes: movement lives here |
@@ -76,7 +76,7 @@ server and client together.
 | `src/i18n/*.json` | All player-facing text (both files, same keys) | Yes |
 | `public/multiplayer/bootstrap.json` | Public server endpoint for published builds | On deploy |
 
-## Protocol `ring-out-v2`
+## Protocol `ring-out-v3`
 
 | Message | Direction | Fields |
 | --- | --- | --- |

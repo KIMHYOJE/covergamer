@@ -5,7 +5,7 @@
  * The starter ships no audio files: SFX are synthesized and the music is a generative ambient
  * pad. To use recorded assets, `load(url)` an AudioBuffer and `playBuffer()` it on either bus.
  */
-export type Sfx = 'bump' | 'fall' | 'count' | 'go' | 'join' | 'ui' | 'win' | 'lose'
+export type Sfx = 'bump' | 'hard' | 'fall' | 'count' | 'go' | 'join' | 'ui' | 'win' | 'lose' | 'dash' | 'guard' | 'blast'
 
 export class Audio {
   readonly ctx: AudioContext
@@ -73,6 +73,10 @@ export class Audio {
     }
     switch (name) {
       case 'bump': tone(140, 60, 0.16, 'sine', 0.45); tone(420, 180, 0.08, 'square', 0.08); break
+      case 'hard': tone(110, 35, 0.28, 'sine', 0.6); tone(520, 120, 0.12, 'square', 0.14); tone(900, 200, 0.07, 'sawtooth', 0.08); break
+      case 'dash': tone(260, 1100, 0.2, 'sawtooth', 0.14); tone(520, 1800, 0.14, 'triangle', 0.1, 0.03); break
+      case 'guard': tone(520, 780, 0.18, 'triangle', 0.22); tone(780, 1170, 0.26, 'sine', 0.18, 0.07); break
+      case 'blast': tone(180, 26, 0.7, 'sine', 0.75); tone(90, 30, 0.55, 'sawtooth', 0.28); tone(900, 140, 0.3, 'square', 0.12); tone(1400, 300, 0.2, 'triangle', 0.1, 0.02); break
       case 'fall': tone(520, 70, 0.7, 'sawtooth', 0.16); break
       case 'count': tone(520, 520, 0.12, 'triangle', 0.25); break
       case 'go': tone(780, 1040, 0.22, 'triangle', 0.3); break

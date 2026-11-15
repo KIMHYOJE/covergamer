@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { RemoteTrack } from '../src/game/balls'
 import { cameraSide, stickToWorld } from '../src/game/camera'
 import { CONFIG } from '../src/game/config'
-import { HIT_WINDOW, OwnBall } from '../src/game/localBall'
+import { HIT_WINDOW, OwnBall, SKILLS } from '../src/game/localBall'
 import { bootstrapUrl, validEndpoint } from '../src/net/connection'
 import { BUILD, decode, generateRoom, sanitizeRoom, validRoom, type Pose } from '../src/net/protocol'
 
-const RULES = { arena_radius: 10, ball_radius: 0.8, accel: 16, damping: 1.1, max_speed: 9, restitution: 0.95, win_score: 3 }
+const RULES = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3 }
 const SPAWN = { p1: { x: 0, z: 4 }, p2: { x: 0, z: -4 }, p3: { x: 4, z: 0 }, p4: { x: -4, z: 0 } }
 const seat = (patch: Record<string, unknown> = {}) => ({ connected: true, playing: true, out: false, score: 0, ...patch })
 const room = (patch: Record<string, unknown> = {}) => JSON.stringify({
@@ -31,6 +31,11 @@ describe('protocol', () => {
     expect(decode(JSON.stringify({ type: 'hit', marker: BUILD, room: 'ROOM1', seat: 'p2', round: 1, jx: 3, jz: 0 }), 'ROOM1', -1)?.type).toBe('hit')
     expect(decode(JSON.stringify({ type: 'hit', marker: BUILD, room: 'ROOM1', seat: 'p2', round: 1, jx: 1e6, jz: 0 }), 'ROOM1', -1)).toBeNull()
     expect(decode(welcome({ marker: 'ring-out-v1' }), 'ROOM1', -1)).toBeNull()
+    const skill = { type: 'skill', marker: BUILD, room: 'ROOM1', seat: 'p2', kind: 'blast', round: 1, x: 1, z: -2 }
+    expect(decode(JSON.stringify(skill), 'ROOM1', -1)?.type).toBe('skill')
+    expect(decode(JSON.stringify({ ...skill, kind: 'nuke' }), 'ROOM1', -1)).toBeNull()
+    expect(decode(JSON.stringify({ ...skill, seat: 'p9' }), 'ROOM1', -1)).toBeNull()
+    expect(decode(JSON.stringify({ ...skill, x: 1e6 }), 'ROOM1', -1)).toBeNull()
     expect(decode(room(), 'OTHER', -1)).toBeNull()
   })
 
@@ -195,5 +200,89 @@ describe('client-owned movement', () => {
     expect(track.reportedOutside(RULES.arena_radius)).toBe(false)
     track.push(pose({ seq: 3, x: 10.5, z: 0 }), 0.05, 12)
     expect(track.reportedOutside(RULES.arena_radius)).toBe(true)
+  })
+})
+
+describe('skills', () => {
+  const ready = () => {
+    const own = new OwnBall()
+    own.configure(RULES)
+    own.place(0, 0)
+    return own
+  }
+  const settle = (own: OwnBall, seconds: number) => {
+    for (let t = 0; t < seconds; t += 1 / 60) own.step(1 / 60, [])
+  }
+
+  it('dash needs a direction, adds speed past the normal cap and then fades back', () => {
+    const own = ready()
+    own.configure({ ...RULES, arena_radius: 200 })
+    expect(own.use('dash')).toBeNull()
+    expect(own.cooldown.dash).toBe(0)
+    own.setInput(1, 0)
+    expect(own.use('dash')).toEqual({ x: 0, z: 0 })
+    expect(own.vx).toBeGreaterThan(RULES.max_speed * 0.8)
+    expect(own.cooldown.dash).toBe(SKILLS.dash.cooldown)
+    own.step(1 / 60, [])
+    expect(Math.hypot(own.vx, own.vz)).toBeGreaterThan(RULES.max_speed)
+    expect(Math.hypot(own.vx, own.vz)).toBeLessThanOrEqual(RULES.max_speed * 1.9)
+    own.setInput(0, 0)
+    settle(own, 3)
+    expect(Math.hypot(own.vx, own.vz)).toBeLessThan(RULES.max_speed)
+    expect(own.use('dash')).not.toBeNull()
+  })
+
+  it('a skill is ready only once its cooldown has run out, and not when out of play', () => {
+    const own = ready()
+    expect(own.use('guard')).not.toBeNull()
+    expect(own.use('guard')).toBeNull()
+    settle(own, SKILLS.guard.cooldown + 0.1)
+    expect(own.use('guard')).not.toBeNull()
+    own.out = true
+    expect(own.use('blast')).toBeNull()
+  })
+
+  it('blast waits a few seconds at the start of a round', () => {
+    const own = ready()
+    expect(own.use('blast')).toBeNull()
+    settle(own, SKILLS.blast.firstCooldown + 0.1)
+    expect(own.use('blast')).not.toBeNull()
+  })
+
+  it('a blast pushes balls inside its radius away from the origin, harder near the centre', () => {
+    const near = ready()
+    near.place(1, 0)
+    const far = ready()
+    far.place(SKILLS.blast.radius - 0.5, 0)
+    const outside = ready()
+    outside.place(SKILLS.blast.radius + 0.5, 0)
+    expect(near.receiveBlast(0, 0)).toBeGreaterThan(far.receiveBlast(0, 0))
+    expect(near.vx).toBeGreaterThan(far.vx)
+    expect(far.vx).toBeGreaterThan(0)
+    expect(outside.receiveBlast(0, 0)).toBe(0)
+    expect(outside.vx).toBe(0)
+    expect(Math.hypot(near.vx, near.vz)).toBeLessThanOrEqual(RULES.max_speed * 1.9)
+  })
+
+  it('guard softens blasts and hits, and ends when its time is up', () => {
+    const plain = ready()
+    plain.place(1, 0)
+    plain.receiveBlast(0, 0)
+    const guarded = ready()
+    guarded.place(1, 0)
+    guarded.use('guard')
+    guarded.receiveBlast(0, 0)
+    expect(guarded.vx).toBeCloseTo(plain.vx * SKILLS.guard.soften, 5)
+    settle(guarded, SKILLS.guard.duration + 0.1)
+    expect(guarded.guardLeft).toBe(0)
+  })
+
+  it('a contact impulse is capped below the limit the server relays', () => {
+    const a = ready()
+    a.place(0, 0)
+    a.vx = RULES.max_speed * 1.9
+    const hits = a.step(1 / 60, [{ seat: 'p2', ball: { x: 1.2, z: 0, vx: -RULES.max_speed * 1.9, vz: 0 } }])
+    expect(hits.length).toBe(1)
+    expect(Math.hypot(hits[0].jx, hits[0].jz)).toBeLessThanOrEqual(RULES.max_speed * 2)
   })
 })
