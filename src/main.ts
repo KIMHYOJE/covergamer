@@ -40,6 +40,8 @@ async function boot(): Promise<void> {
   let lastPingAt = 0
   /** Smoothed one-way latency to the server, in seconds (half the ping round trip). */
   let latency = -1
+  /** Who is holding the blast: the Space key, an on-screen button, or nobody. */
+  let blastHold: 'key' | 'ui' | null = null
 
   const applySettings = (d: SaveData) => {
     audio.setVolumes(d.musicVolume, d.sfxVolume, d.muted)
@@ -163,7 +165,12 @@ async function boot(): Promise<void> {
       game?.leave()
       ui.show('title')
     },
-    skill: kind => game?.useSkill(kind),
+    skill: (kind, down) => {
+      if (kind === 'blast') {
+        if (down) { if (game?.startBlast()) blastHold = 'ui' }
+        else if (blastHold === 'ui') { blastHold = null; game?.releaseBlast() }
+      } else if (down && kind !== 'charge') game?.useSkill(kind)
+    },
     invite: () => {
       const url = inviteUrl(room)
       navigator.clipboard?.writeText(url).then(() => ui.copied(), () => window.prompt(i18n.t('hud.invite'), url))
@@ -202,7 +209,6 @@ async function boot(): Promise<void> {
       if (kind === 'round') ui.go()
     },
     shrink: () => ui.shrink(),
-    hurt: amount => ui.hurt(amount),
   })
   game.reducedMotion = save.data.reducedMotion
   if (import.meta.env.DEV) {
@@ -226,14 +232,19 @@ async function boot(): Promise<void> {
       g.setInput(stick.x, stick.z)
       // Skills: Space = blast, F or left click = dash, E = guard (on screen: the three buttons).
       if (ui.screen === 'hud') {
-        if (input.consume('jump')) g.useSkill('blast')
+        if (input.consume('jump') && g.startBlast()) blastHold = 'key'
+        if (blastHold === 'key' && !input.held('jump')) { blastHold = null; g.releaseBlast() }
         if (input.consume('dash')) g.useSkill('dash')
         if (input.consume('interact')) g.useSkill('guard')
+      } else if (blastHold) {
+        // The menu opened while holding: fire what has been charged rather than lose it.
+        blastHold = null
+        g.releaseBlast()
       }
       publish(performance.now())
       g.render(frameSeconds)
       if (active) {
-        ui.updateHud({ room, role: g.role, status, state: g.state, phaseSeconds: g.phaseSeconds(), maxHp: g.maxHp })
+        ui.updateHud({ room, role: g.role, status, state: g.state, phaseSeconds: g.phaseSeconds() })
         ui.updateSkills(g.skillStatus(), g.role !== 'spectator' && (g.state?.phase === 'live' || g.state?.phase === 'countdown'))
       }
       input.endFrame()

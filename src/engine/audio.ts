@@ -55,6 +55,23 @@ export class Audio {
     return src
   }
 
+  /** A short rising blip at `freq` Hz; the charging blast plays them higher as it fills. */
+  blip(freq: number, volume = 0.12): void {
+    if (this.ctx.state !== 'running') return
+    const t = this.ctx.currentTime
+    const o = this.ctx.createOscillator()
+    const g = this.ctx.createGain()
+    o.type = 'triangle'
+    o.frequency.setValueAtTime(freq, t)
+    o.frequency.exponentialRampToValueAtTime(freq * 1.25, t + 0.09)
+    g.gain.setValueAtTime(0.0001, t)
+    g.gain.exponentialRampToValueAtTime(volume, t + 0.01)
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.1)
+    o.connect(g).connect(this.sfx)
+    o.start(t)
+    o.stop(t + 0.12)
+  }
+
   play(name: Sfx): void {
     if (this.ctx.state !== 'running') return
     const t = this.ctx.currentTime

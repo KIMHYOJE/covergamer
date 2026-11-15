@@ -100,8 +100,10 @@ export class BallView {
   private readonly marker: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
   private readonly body: THREE.MeshStandardMaterial
   private readonly bubble: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
-  private readonly hpBar = new THREE.Group()
-  private readonly hpFill: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
+  private readonly chargeRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
+  private readonly chargeDisc: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>
+  private charge = -1
+  private chargeRadius = 4
   private dashing = false
   private guarding = false
   private radius = 0.8
@@ -126,18 +128,17 @@ export class BallView {
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false, toneMapped: false }))
     this.marker.rotation.x = -Math.PI / 2
     this.marker.visible = false
-    // Health bar above the ball, turned to face the camera each frame.
-    const flat = { depthTest: false, depthWrite: false, toneMapped: false } as const
-    const track = new THREE.Mesh(new THREE.PlaneGeometry(1.75, 0.26), new THREE.MeshBasicMaterial({ color: '#120f2b', transparent: true, opacity: 0.85, ...flat }))
-    const fill = new THREE.PlaneGeometry(1.6, 0.15)
-    fill.translate(0.8, 0, 0)
-    this.hpFill = new THREE.Mesh(fill, new THREE.MeshBasicMaterial({ color: '#7ddc6a', ...flat }))
-    this.hpFill.position.set(-0.8, 0, 0.002)
-    track.renderOrder = 20
-    this.hpFill.renderOrder = 21
-    this.hpBar.add(track, this.hpFill)
-    this.hpBar.visible = false
-    this.root.add(this.mesh, this.shadow, this.marker, this.bubble, this.hpBar)
+    // The reach of a charging blast, drawn on the floor so everyone can see what it will hit.
+    const glow = { transparent: true, depthWrite: false, toneMapped: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide } as const
+    this.chargeRing = new THREE.Mesh(new THREE.RingGeometry(0.96, 1, 96), new THREE.MeshBasicMaterial({ color, opacity: 0.8, ...glow }))
+    this.chargeDisc = new THREE.Mesh(new THREE.CircleGeometry(1, 64), new THREE.MeshBasicMaterial({ color, opacity: 0.1, ...glow }))
+    for (const mesh of [this.chargeRing, this.chargeDisc]) {
+      mesh.rotation.x = -Math.PI / 2
+      mesh.position.y = 0.035
+      mesh.visible = false
+      this.root.add(mesh)
+    }
+    this.root.add(this.mesh, this.shadow, this.marker, this.bubble)
     this.setRadius(0.8)
   }
 
@@ -148,21 +149,12 @@ export class BallView {
     this.marker.scale.setScalar(radius)
   }
 
-  /** Health bar above the ball: `fraction` in 0..1, facing the camera by `facing`. */
-  setHpBar(fraction: number, show: boolean, facing?: THREE.Quaternion): void {
-    this.hpBar.visible = show
-    if (!show) return
-    const f = Math.min(1, Math.max(0, fraction))
-    this.hpFill.scale.x = Math.max(0.001, f)
-    this.hpFill.material.color.setHSL(f * 0.33, 0.8, 0.5)
-    this.hpBar.position.set(0, this.radius * 2 + 0.75, 0)
-    if (facing) this.hpBar.quaternion.copy(facing)
-  }
-
   /** Dash glow and guard bubble, from this client's own skills or a rival's announced ones. */
-  setState(dashing: boolean, guarding: boolean): void {
+  setState(dashing: boolean, guarding: boolean, charge = -1, chargeRadius = 4): void {
     this.dashing = dashing
     this.guarding = guarding
+    this.charge = charge
+    this.chargeRadius = chargeRadius
   }
 
   setOwn(own: boolean): void {
@@ -192,7 +184,16 @@ export class BallView {
     this.shadow.position.y = 0.01
     this.shadow.visible = !this.falling
     this.marker.position.y = 0.02
-    this.body.emissiveIntensity = this.dashing ? 0.9 + Math.sin(time * 40) * 0.2 : this.guarding ? 0.25 : 0
+    const charging = this.charge >= 0 && !this.falling
+    const glowing = this.dashing ? 0.9 + Math.sin(time * 40) * 0.2 : this.guarding ? 0.25 : 0
+    this.body.emissiveIntensity = Math.max(glowing, charging ? 0.3 + this.charge * 0.9 + Math.sin(time * (12 + this.charge * 30)) * 0.15 : 0)
+    this.chargeRing.visible = this.chargeDisc.visible = charging
+    if (charging) {
+      this.chargeRing.scale.setScalar(this.chargeRadius)
+      this.chargeDisc.scale.setScalar(this.chargeRadius)
+      this.chargeRing.material.opacity = 0.5 + this.charge * 0.3 + Math.sin(time * (10 + this.charge * 30)) * 0.2
+      this.chargeDisc.material.opacity = 0.05 + this.charge * 0.13
+    }
     this.bubble.visible = this.guarding && !this.falling
     if (this.bubble.visible) {
       this.bubble.position.y = this.mesh.position.y

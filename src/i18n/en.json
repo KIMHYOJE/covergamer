@@ -42,7 +42,7 @@
   "status.lost": "You lose",
   "status.wins": "{player} wins",
   "status.rematch": "Rematch in {s}",
-  "hint.move": "{keys} roll · Space Blast · F Dash · E Guard — push rivals off the edge!",
+  "hint.move": "{keys} roll · hold Space to charge Blast · F Dash · E Guard — push rivals off the edge!",
   "hint.move.touch": "Drag anywhere to roll. Push your rivals off the edge!",
   "settings.title": "Settings",
   "settings.audio": "Audio",
@@ -63,6 +63,5 @@
   "skill.guard": "Guard",
   "skill.blast": "Blast",
   "status.shrink": "ARENA SHRINKING!",
-  "status.shrink.sub": "The red zone pushes you toward the centre",
-  "hud.hp": "HP"
+  "status.shrink.sub": "The red zone pushes you toward the centre"
 }

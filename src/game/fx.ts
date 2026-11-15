@@ -56,6 +56,19 @@ export class Effects {
     this.spawn({ life: 0, max: 0.28 + Math.random() * 0.14, pos: at.clone(), vel, size: size * (0.9 + Math.random() * 0.5), color: new THREE.Color(color), gravity: 0 })
   }
 
+  /** Specks drawn in toward a charging ball from the edge of its blast radius. */
+  implode(at: THREE.Vector3, color: THREE.ColorRepresentation, radius: number, count = 2): void {
+    const c = new THREE.Color(color)
+    for (let i = 0; i < count; i += 1) {
+      const a = Math.random() * Math.PI * 2
+      const dir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a))
+      const pos = at.clone().addScaledVector(dir, radius * (0.8 + Math.random() * 0.2))
+      pos.y = 0.15 + Math.random() * 0.8
+      const vel = dir.clone().multiplyScalar(-radius * 3.6)
+      this.spawn({ life: 0, max: 0.32, pos, vel, size: 0.8 + Math.random() * 0.7, color: c, gravity: 0 })
+    }
+  }
+
   /** A ring of fast particles flung outward along the floor (blast). */
   radial(at: THREE.Vector3, color: THREE.ColorRepresentation, count = 40, speed = 11): void {
     const c = new THREE.Color(color)

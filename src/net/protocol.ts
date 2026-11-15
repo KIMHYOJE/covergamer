@@ -11,11 +11,10 @@ export type Seat = 'p1' | 'p2' | 'p3' | 'p4'
 export type Role = Seat | 'spectator'
 export type Phase = 'waiting' | 'countdown' | 'live' | 'point' | 'ended'
 /** `round`: a round went live. `ringout`: `seat` left the arena. `point`: `seat` (or nobody) took the round. `match`: `seat` won. */
-export type EventKind = '' | 'round' | 'ringout' | 'ko' | 'point' | 'match'
-export type Rules = { arena_radius: number; ball_radius: number; accel: number; damping: number; max_speed: number; restitution: number; win_score: number; max_hp: number }
+export type EventKind = '' | 'round' | 'ringout' | 'point' | 'match'
+export type Rules = { arena_radius: number; ball_radius: number; accel: number; damping: number; max_speed: number; restitution: number; win_score: number }
 export type Point = { x: number; z: number }
-/** `hp`: health left this round, 0 to `rules.max_hp`; a ball at 0 is out (`ko`). */
-export type SeatState = { connected: boolean; playing: boolean; out: boolean; score: number; hp: number }
+export type SeatState = { connected: boolean; playing: boolean; out: boolean; score: number }
 
 export type Welcome = { type: 'welcome'; marker: string; room: string; role: Role; resume_token: string; rules: Rules; spawn: Record<Seat, Point> }
 /** Room state. The server sends it only when something changes; `event.seq` identifies each event once. */
@@ -27,17 +26,18 @@ export type RoomState = {
 export type Pose = { type: 'pose'; marker: string; room: string; seat: Seat; round: number; seq: number; x: number; z: number; vx: number; vz: number; lat: number }
 /** `seat` bumped this client's ball and sends this ball's half of the contact impulse. */
 export type Hit = { type: 'hit'; marker: string; room: string; seat: Seat; round: number; jx: number; jz: number }
-export type SkillKind = 'dash' | 'guard' | 'blast'
-export const SKILL_KINDS: readonly SkillKind[] = ['dash', 'guard', 'blast']
-/** `seat` used a skill at `x`, `z`. A blast pushes every ball near that point; the others are visual. */
-export type Skill = { type: 'skill'; marker: string; room: string; seat: Seat; kind: SkillKind; round: number; x: number; z: number }
+/** `charge`: the owner started holding a blast (a telegraph for the others); `blast` ends it with `power`. */
+export type SkillKind = 'dash' | 'guard' | 'blast' | 'charge'
+export const SKILL_KINDS: readonly SkillKind[] = ['dash', 'guard', 'blast', 'charge']
+/** `seat` used a skill at `x`, `z`. A blast of `power` 0..1 pushes every ball near that point; the others are visual. */
+export type Skill = { type: 'skill'; marker: string; room: string; seat: Seat; kind: SkillKind; round: number; x: number; z: number; power: number }
 export type Pong = { type: 'pong'; marker: string; room: string; t: number }
 export type ServiceError = { type: 'error'; marker: string; room: string; code: 'invalid_message' }
 export type Message = Welcome | RoomState | Pose | Hit | Skill | Pong | ServiceError
 
 export const SEATS: readonly Seat[] = ['p1', 'p2', 'p3', 'p4']
 const PHASES: readonly string[] = ['waiting', 'countdown', 'live', 'point', 'ended']
-const EVENTS: readonly string[] = ['', 'round', 'ringout', 'ko', 'point', 'match']
+const EVENTS: readonly string[] = ['', 'round', 'ringout', 'point', 'match']
 const TYPES: readonly string[] = ['welcome', 'room', 'pose', 'hit', 'skill', 'pong', 'error']
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const POSITION_LIMIT = 100
@@ -78,10 +78,10 @@ export function parseEnvelope(text: string): Raw | null {
 
 function validRules(raw: unknown): raw is Rules {
   if (!isObject(raw)) return false
-  const { arena_radius: arena, ball_radius: ball, accel, damping, max_speed: max, restitution, win_score: win, max_hp: maxHp } = raw
+  const { arena_radius: arena, ball_radius: ball, accel, damping, max_speed: max, restitution, win_score: win } = raw
   return within(arena, POSITION_LIMIT) && arena > 0 && within(ball, 10) && ball > 0 && ball < arena
     && within(accel, 200) && accel > 0 && within(damping, 20) && damping >= 0 && within(max, SPEED_LIMIT) && max > 0
-    && within(restitution, 1) && restitution >= 0 && isUint(win) && win > 0 && win <= 99 && isUint(maxHp) && maxHp > 0 && maxHp <= 1000
+    && within(restitution, 1) && restitution >= 0 && isUint(win) && win > 0 && win <= 99
 }
 
 function validSpawn(raw: unknown, arena: number): raw is Record<Seat, Point> {
@@ -92,7 +92,7 @@ function validSpawn(raw: unknown, arena: number): raw is Record<Seat, Point> {
 }
 
 function validSeat(raw: unknown): raw is SeatState {
-  return isObject(raw) && typeof raw.connected === 'boolean' && typeof raw.playing === 'boolean' && typeof raw.out === 'boolean' && isUint(raw.score) && isUint(raw.hp) && raw.hp <= 1000
+  return isObject(raw) && typeof raw.connected === 'boolean' && typeof raw.playing === 'boolean' && typeof raw.out === 'boolean' && isUint(raw.score)
 }
 
 /**
@@ -119,7 +119,8 @@ export function decode(text: string, room: string, lastSeq: number): Message | n
     return isSeat(raw.seat) && isUint(raw.round) && within(raw.jx, SPEED_LIMIT) && within(raw.jz, SPEED_LIMIT) ? (raw as Hit) : null
   }
   if (raw.type === 'skill') {
-    return isSeat(raw.seat) && SKILL_KINDS.includes(raw.kind as SkillKind) && isUint(raw.round) && within(raw.x, POSITION_LIMIT) && within(raw.z, POSITION_LIMIT) ? (raw as Skill) : null
+    return isSeat(raw.seat) && SKILL_KINDS.includes(raw.kind as SkillKind) && isUint(raw.round) && within(raw.x, POSITION_LIMIT) && within(raw.z, POSITION_LIMIT)
+      && isNumber(raw.power) && raw.power >= 0 && raw.power <= 1 ? (raw as Skill) : null
   }
   if (!isUint(raw.seq) || raw.seq <= lastSeq || !isUint(raw.round) || !PHASES.includes(raw.phase as string) || !isUint(raw.phase_ends_in_ms)) return null
   const { seats, event } = raw

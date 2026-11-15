@@ -15,12 +15,15 @@ export type UiActions = {
   menu(open: boolean): void
   leave(): void
   invite(): void
-  /** A skill button was pressed (touch or mouse). */
-  skill(kind: SkillKind): void
+  /** A skill button went down (`down`) or came up. A blast is held to charge and fires on release. */
+  skill(kind: SkillKind, down: boolean): void
   settings(patch: Partial<SaveData>): void
 }
 
-export type HudView = { room: string; role: Role; status: NetStatus; state: RoomState | null; phaseSeconds: number; maxHp: number }
+/** Cooldowns and the blast charge (-1 when not holding), from the game. */
+export type SkillStatus = Record<'dash' | 'guard' | 'blast', { left: number; total: number }> & { charge: number }
+
+export type HudView = { room: string; role: Role; status: NetStatus; state: RoomState | null; phaseSeconds: number }
 
 const ICON = {
   ring: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="3"/><circle cx="9" cy="12" r="3" fill="currentColor"/><circle cx="16" cy="11" r="2.2" fill="#fff" opacity=".8"/></svg>',
@@ -47,7 +50,7 @@ export class Ui {
   private lastMethod = ''
   private goUntil = 0
   private shrinkUntil = 0
-  private hurtTimer = 0
+  private heldSkill: SkillKind | null = null
   private copiedUntil = 0
 
   constructor(
@@ -65,8 +68,17 @@ export class Ui {
       const button = (e.target as HTMLElement).closest<HTMLElement>('[data-skill]')
       if (!button || this.screen !== 'hud') return
       e.preventDefault()
-      this.actions.skill(button.dataset.skill as SkillKind)
+      this.heldSkill = button.dataset.skill as SkillKind
+      this.actions.skill(this.heldSkill, true)
     })
+    const letGo = () => {
+      if (!this.heldSkill) return
+      const kind = this.heldSkill
+      this.heldSkill = null
+      this.actions.skill(kind, false)
+    }
+    window.addEventListener('pointerup', letGo)
+    window.addEventListener('pointercancel', letGo)
     this.root.addEventListener('input', e => this.onInput(e))
     this.root.addEventListener('focusin', e => {
       if ((e.target as HTMLElement).matches('.btn, .seg button, .toggle')) this.audio.play('ui')
@@ -123,17 +135,6 @@ export class Ui {
   }
 
   /** A short "GO!" after each round starts. */
-  /** Flashes the screen edges red when the own ball loses health. */
-  hurt(amount: number): void {
-    const flash = this.q('.hurt-flash')
-    flash.style.setProperty('--hurt', String(Math.min(1, 0.35 + amount / 30)))
-    flash.classList.remove('is-hurt')
-    void flash.offsetWidth
-    flash.classList.add('is-hurt')
-    window.clearTimeout(this.hurtTimer)
-    this.hurtTimer = window.setTimeout(() => flash.classList.remove('is-hurt'), 500)
-  }
-
   /** Shows the shrinking-arena notice for a few seconds. */
   shrink(): void {
     this.shrinkUntil = performance.now() + 3000
@@ -164,13 +165,6 @@ export class Ui {
       side.hidden = (seat === 'p3' || seat === 'p4') && !(value && (value.connected || value.score > 0))
       side.classList.toggle('is-away', !!value && !value.connected)
       side.classList.toggle('is-out', !!value && value.out && state?.phase === 'live')
-      this.setHp(this.q(`[data-hp="${seat}"]`), seat, value ? value.hp / view.maxHp : 1)
-    }
-    const mine = role !== 'spectator' ? state?.seats[role] : undefined
-    this.q('.hp-main').classList.toggle('is-active', !!mine && (state?.phase === 'live' || state?.phase === 'countdown'))
-    if (mine) {
-      this.setHp(this.q('[data-hp="own"]'), 'own', mine.hp / view.maxHp)
-      this.set('hp-own', `${t('hud.hp')} ${mine.hp}`)
     }
     this.q('.hud-status').dataset.status = view.status === 'online' ? (state?.phase ?? 'waiting') : 'offline'
 
@@ -204,7 +198,7 @@ export class Ui {
   }
 
   /** Cooldown fill and countdown on the three skill buttons. `show`: the player has a ball this round. */
-  updateSkills(status: Record<SkillKind, { left: number; total: number }>, show: boolean): void {
+  updateSkills(status: SkillStatus, show: boolean): void {
     this.q('.skills').classList.toggle('is-active', show)
     if (!show) return
     for (const kind of ['dash', 'guard', 'blast'] as const) {
@@ -212,18 +206,11 @@ export class Ui {
       const button = this.q(`[data-skill="${kind}"]`)
       button.style.setProperty('--cd', String(Math.min(1, left / total)))
       button.classList.toggle('is-ready', left <= 0)
-      this.set(`skill-${kind}`, left > 0 ? String(Math.ceil(left)) : '')
+      const charging = kind === 'blast' && status.charge >= 0
+      button.classList.toggle('is-charging', charging)
+      if (kind === 'blast') button.style.setProperty('--charge', String(Math.max(0, status.charge)))
+      this.set(`skill-${kind}`, charging ? `${Math.round(status.charge * 100)}%` : left > 0 ? String(Math.ceil(left)) : '')
     }
-  }
-
-  /** Width and colour of a health bar, written only when they change. */
-  private setHp(bar: HTMLElement, key: string, fraction: number): void {
-    const f = Math.min(1, Math.max(0, fraction))
-    const value = `${Math.round(f * 100)}`
-    if (this.hudCache.get(`hp-${key}`) === value) return
-    this.hudCache.set(`hp-${key}`, value)
-    bar.style.width = `${value}%`
-    bar.style.background = `hsl(${Math.round(f * 120)}, 80%, 52%)`
   }
 
   private renderHint(): void {
@@ -427,7 +414,7 @@ export class Ui {
     const toggle = (setting: string, label: string) =>
       `<div class="row"><span data-i18n="${label}"></span><button data-nav class="toggle" data-setting="${setting}" aria-pressed="false"><i></i><span></span></button></div>`
     const side = (seat: Seat) =>
-      `<div class="hud-side hud-side-${seat}" style="--seat:${SEAT_COLORS[seat]}"><i></i><span data-slot="name-${seat}"></span><b data-slot="score-${seat}"></b><div class="hp"><div data-hp="${seat}"></div></div></div>`
+      `<div class="hud-side hud-side-${seat}" style="--seat:${SEAT_COLORS[seat]}"><i></i><span data-slot="name-${seat}"></span><b data-slot="score-${seat}"></b></div>`
     return /* html */ `
 <section class="screen screen-boot is-active" data-screen="boot">
   <div class="boot-logo" data-i18n="game.title"></div>
@@ -467,9 +454,7 @@ export class Ui {
     <button class="hud-pause" data-action="menu" data-i18n-label="menu.title">${ICON.menu}</button>
   </div>
   <div class="hud-banner"><b data-slot="banner"></b><span data-slot="banner-sub"></span></div>
-  <div class="hurt-flash"></div>
   <div class="hint"><span></span></div>
-  <div class="hp-main"><div class="hp-track"><div data-hp="own"></div></div><b data-slot="hp-own"></b></div>
   <div class="skills">
     <button class="skill" data-skill="dash" tabindex="-1"><kbd>F</kbd><b data-i18n="skill.dash"></b><em data-slot="skill-dash"></em></button>
     <button class="skill" data-skill="guard" tabindex="-1"><kbd>E</kbd><b data-i18n="skill.guard"></b><em data-slot="skill-guard"></em></button>

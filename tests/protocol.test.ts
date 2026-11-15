@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { RemoteTrack } from '../src/game/balls'
 import { cameraSide, stickToWorld } from '../src/game/camera'
 import { CONFIG } from '../src/game/config'
-import { floorRadius, HIT_WINDOW, OwnBall, SHRINK, SKILLS } from '../src/game/localBall'
+import { BLAST, blastStats, chargeLevel, floorRadius, HIT_WINDOW, OwnBall, SHRINK, SKILLS } from '../src/game/localBall'
 import { bootstrapUrl, validEndpoint } from '../src/net/connection'
 import { BUILD, decode, generateRoom, sanitizeRoom, validRoom, type Pose } from '../src/net/protocol'
 
-const RULES = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3, max_hp: 100 }
+const RULES = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3 }
 const SPAWN = { p1: { x: 0, z: 4 }, p2: { x: 0, z: -4 }, p3: { x: 4, z: 0 }, p4: { x: -4, z: 0 } }
-const seat = (patch: Record<string, unknown> = {}) => ({ connected: true, playing: true, out: false, score: 0, hp: 100, ...patch })
+const seat = (patch: Record<string, unknown> = {}) => ({ connected: true, playing: true, out: false, score: 0, ...patch })
 const room = (patch: Record<string, unknown> = {}) => JSON.stringify({
   type: 'room', marker: BUILD, room: 'ROOM1', seq: 1, round: 1, phase: 'live', phase_ends_in_ms: 0,
   seats: { p1: seat(), p2: seat(), p3: seat({ connected: false, playing: false }), p4: seat({ connected: false, playing: false }) },
@@ -31,7 +31,11 @@ describe('protocol', () => {
     expect(decode(JSON.stringify({ type: 'hit', marker: BUILD, room: 'ROOM1', seat: 'p2', round: 1, jx: 3, jz: 0 }), 'ROOM1', -1)?.type).toBe('hit')
     expect(decode(JSON.stringify({ type: 'hit', marker: BUILD, room: 'ROOM1', seat: 'p2', round: 1, jx: 1e6, jz: 0 }), 'ROOM1', -1)).toBeNull()
     expect(decode(welcome({ marker: 'ring-out-v1' }), 'ROOM1', -1)).toBeNull()
-    const skill = { type: 'skill', marker: BUILD, room: 'ROOM1', seat: 'p2', kind: 'blast', round: 1, x: 1, z: -2 }
+    const skill = { type: 'skill', marker: BUILD, room: 'ROOM1', seat: 'p2', kind: 'blast', round: 1, x: 1, z: -2, power: 0.5 }
+    expect(decode(JSON.stringify({ ...skill, kind: 'charge', power: 0 }), 'ROOM1', -1)?.type).toBe('skill')
+    expect(decode(JSON.stringify({ ...skill, power: 1.5 }), 'ROOM1', -1)).toBeNull()
+    expect(decode(JSON.stringify({ ...skill, power: -0.1 }), 'ROOM1', -1)).toBeNull()
+    expect(decode(JSON.stringify({ ...skill, power: undefined }), 'ROOM1', -1)).toBeNull()
     expect(decode(JSON.stringify(skill), 'ROOM1', -1)?.type).toBe('skill')
     expect(decode(JSON.stringify({ ...skill, kind: 'nuke' }), 'ROOM1', -1)).toBeNull()
     expect(decode(JSON.stringify({ ...skill, seat: 'p9' }), 'ROOM1', -1)).toBeNull()
@@ -239,23 +243,24 @@ describe('skills', () => {
     settle(own, SKILLS.guard.cooldown + 0.1)
     expect(own.use('guard')).not.toBeNull()
     own.out = true
-    expect(own.use('blast')).toBeNull()
+    expect(own.use('dash')).toBeNull()
+    expect(own.startCharge()).toBe(false)
   })
 
   it('blast waits a few seconds at the start of a round', () => {
     const own = ready()
-    expect(own.use('blast')).toBeNull()
-    settle(own, SKILLS.blast.firstCooldown + 0.1)
-    expect(own.use('blast')).not.toBeNull()
+    expect(own.startCharge()).toBe(false)
+    settle(own, BLAST.firstCooldown + 0.1)
+    expect(own.startCharge()).toBe(true)
   })
 
   it('a blast pushes balls inside its radius away from the origin, harder near the centre', () => {
     const near = ready()
     near.place(1, 0)
     const far = ready()
-    far.place(SKILLS.blast.radius - 0.5, 0)
+    far.place(blastStats(0.3).radius - 0.5, 0)
     const outside = ready()
-    outside.place(SKILLS.blast.radius + 0.5, 0)
+    outside.place(blastStats(0.3).radius + 0.5, 0)
     expect(near.receiveBlast(0, 0)).toBeGreaterThan(far.receiveBlast(0, 0))
     expect(near.vx).toBeGreaterThan(far.vx)
     expect(far.vx).toBeGreaterThan(0)
@@ -364,20 +369,145 @@ describe('dash ram', () => {
   })
 })
 
-describe('health on the wire', () => {
-  it('room seats carry bounded hp and the ko event is accepted', () => {
-    const ko = room({ event: { seq: 2, kind: 'ko', seat: 'p2' }, seats: { p1: seat(), p2: seat({ hp: 0, out: true }), p3: seat({ connected: false, playing: false }), p4: seat({ connected: false, playing: false }) } })
-    expect(decode(ko, 'ROOM1', -1)?.type).toBe('room')
-    const missing = JSON.parse(room())
-    delete missing.seats.p1.hp
-    expect(decode(JSON.stringify(missing), 'ROOM1', -1)).toBeNull()
-    expect(decode(room({ seats: { p1: seat({ hp: -1 }), p2: seat(), p3: seat(), p4: seat() } }), 'ROOM1', -1)).toBeNull()
-    expect(decode(room({ seats: { p1: seat({ hp: 1e6 }), p2: seat(), p3: seat(), p4: seat() } }), 'ROOM1', -1)).toBeNull()
+describe('charged blast', () => {
+  const ready = () => {
+    const own = new OwnBall()
+    own.configure({ ...RULES, arena_radius: 200 })
+    own.place(0, 0)
+    for (let t = 0; t < BLAST.firstCooldown + 0.1; t += 1 / 60) own.step(1 / 60, [])
+    return own
+  }
+  const hold = (own: OwnBall, seconds: number) => {
+    for (let t = 0; t < seconds; t += 1 / 60) own.step(1 / 60, [])
+  }
+
+  it('a longer charge reaches further, pushes harder and recharges slower', () => {
+    const tap = blastStats(0)
+    const full = blastStats(1)
+    expect(full.radius).toBeGreaterThan(tap.radius)
+    expect(full.power).toBeGreaterThan(tap.power)
+    expect(full.cooldown).toBeGreaterThan(tap.cooldown)
+    expect(blastStats(0.5).radius).toBeGreaterThan(tap.radius)
+    expect(blastStats(0.5).radius).toBeLessThan(full.radius)
+    expect(blastStats(-3)).toEqual(tap)
+    expect(blastStats(9)).toEqual(full)
   })
 
-  it('welcome rules need a sane max_hp', () => {
-    expect(decode(welcome({ rules: { ...RULES, max_hp: 0 } }), 'ROOM1', -1)).toBeNull()
-    expect(decode(welcome({ rules: { ...RULES, max_hp: 100.5 } }), 'ROOM1', -1)).toBeNull()
-    expect(decode(welcome({ rules: { ...RULES, max_hp: undefined } }), 'ROOM1', -1)).toBeNull()
+  it('a quick tap is level 0 and the full charge time is level 1', () => {
+    expect(chargeLevel(0)).toBe(0)
+    expect(chargeLevel(BLAST.minCharge)).toBe(0)
+    expect(chargeLevel(BLAST.chargeTime)).toBe(1)
+    expect(chargeLevel(BLAST.autoRelease)).toBe(1)
+    expect(chargeLevel((BLAST.minCharge + BLAST.chargeTime) / 2)).toBeCloseTo(0.5, 5)
+  })
+
+  it('holding charges, releasing fires at that level and sets the matching cooldown', () => {
+    const own = ready()
+    expect(own.startCharge()).toBe(true)
+    expect(own.startCharge()).toBe(false)
+    hold(own, BLAST.chargeTime)
+    expect(own.charging).toBe(true)
+    const shot = own.release()
+    expect(shot).not.toBeNull()
+    expect(shot!.level).toBe(1)
+    expect(own.charging).toBe(false)
+    expect(own.cooldown.blast).toBeCloseTo(blastStats(1).cooldown, 5)
+    expect(own.blastTotal).toBeCloseTo(blastStats(1).cooldown, 5)
+    expect(own.release()).toBeNull()
+    expect(own.startCharge()).toBe(false)
+
+    const quick = ready()
+    quick.startCharge()
+    hold(quick, 0.05)
+    expect(quick.release()!.level).toBe(0)
+    expect(quick.cooldown.blast).toBeCloseTo(blastStats(0).cooldown, 5)
+  })
+
+  it('a charging ball handles slower', () => {
+    const free = ready()
+    free.setInput(1, 0)
+    hold(free, 0.4)
+    const charging = ready()
+    charging.startCharge()
+    charging.setInput(1, 0)
+    hold(charging, 0.4)
+    expect(charging.vx).toBeGreaterThan(0)
+    expect(charging.vx).toBeLessThan(free.vx * 0.75)
+  })
+
+  it('a hit or a blast breaks the charge, a guard protects it, a dash gives it up', () => {
+    const hit = ready()
+    hit.startCharge()
+    hold(hit, 0.5)
+    hit.receiveHit('p2', BLAST.interruptImpulse + 1, 0)
+    expect(hit.charging).toBe(false)
+    expect(hit.takeBroken()).toBe(true)
+    expect(hit.takeBroken()).toBe(false)
+    expect(hit.cooldown.blast).toBeGreaterThanOrEqual(BLAST.interruptCooldown - 1e-6)
+
+    const light = ready()
+    light.startCharge()
+    light.receiveHit('p2', BLAST.interruptImpulse - 1, 0)
+    expect(light.charging).toBe(true)
+
+    const blasted = ready()
+    blasted.place(1, 0)
+    for (let t = 0; t < BLAST.firstCooldown + 0.1; t += 1 / 60) blasted.step(1 / 60, [])
+    blasted.startCharge()
+    blasted.receiveBlast(0, 0, 0.3)
+    expect(blasted.charging).toBe(false)
+
+    const guarded = ready()
+    guarded.startCharge()
+    guarded.use('guard')
+    guarded.receiveHit('p2', BLAST.interruptImpulse + 3, 0)
+    expect(guarded.charging).toBe(true)
+
+    const dasher = ready()
+    dasher.startCharge()
+    dasher.setInput(1, 0)
+    dasher.use('dash')
+    expect(dasher.charging).toBe(false)
+  })
+
+  it('a blast at the pierce level breaks a guard, a weaker one is softened', () => {
+    const weak = ready()
+    weak.place(1, 0)
+    weak.use('guard')
+    weak.receiveBlast(0, 0, 0.5)
+    const open = ready()
+    open.place(1, 0)
+    open.receiveBlast(0, 0, 0.5)
+    expect(weak.vx).toBeCloseTo(open.vx * SKILLS.guard.soften, 5)
+    expect(weak.guardLeft).toBeGreaterThan(0)
+
+    const strong = ready()
+    strong.place(1, 0)
+    strong.use('guard')
+    strong.receiveBlast(0, 0, 1)
+    const unguarded = ready()
+    unguarded.place(1, 0)
+    unguarded.receiveBlast(0, 0, 1)
+    expect(strong.vx).toBeCloseTo(unguarded.vx, 5)
+    expect(strong.guardLeft).toBe(0)
+  })
+
+  it('the radius and power of a received blast follow its level', () => {
+    const reach = (level: number, distance: number) => {
+      const own = ready()
+      own.place(distance, 0)
+      return own.receiveBlast(0, 0, level)
+    }
+    expect(reach(0, blastStats(0).radius + 0.3)).toBe(0)
+    expect(reach(1, blastStats(0).radius + 0.3)).toBeGreaterThan(0)
+    expect(reach(1, blastStats(1).radius + 0.3)).toBe(0)
+    const small = ready()
+    small.place(1, 0)
+    small.receiveBlast(0, 0, 0)
+    const big = ready()
+    big.place(1, 0)
+    big.receiveBlast(0, 0, 1)
+    expect(big.vx).toBeGreaterThan(small.vx)
+    expect(Math.hypot(big.vx, big.vz)).toBeLessThanOrEqual(RULES.max_speed * 1.9)
   })
 })

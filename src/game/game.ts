@@ -8,7 +8,7 @@ import { BallView, RemoteTrack, SEAT_COLORS } from './balls'
 import { ArenaCamera, cameraSide } from './camera'
 import { CONFIG } from './config'
 import { Effects } from './fx'
-import { floorRadius, OwnBall, SHRINK, SKILLS, type Motion } from './localBall'
+import { blastStats, BLAST, chargeLevel, floorRadius, OwnBall, SHRINK, SKILLS, type Motion } from './localBall'
 
 export type Mode = 'attract' | 'online'
 
@@ -17,8 +17,6 @@ export type GameHooks = {
   event(kind: EventKind, state: RoomState): void
   /** The arena starts shrinking. */
   shrink(): void
-  /** The own ball lost `amount` health. */
-  hurt(amount: number): void
 }
 
 /** The own ball as `main.ts` publishes it. `urgent` asks for a pose now (after a bump or the edge). */
@@ -27,7 +25,9 @@ export type OwnPose = { round: number; x: number; z: number; vx: number; vz: num
 export type OutgoingHit = { to: Seat; round: number; jx: number; jz: number }
 
 /** A skill this client used, as `main.ts` sends it. */
-export type OutgoingSkill = { kind: SkillKind; round: number; x: number; z: number }
+export type OutgoingSkill = { kind: SkillKind; round: number; x: number; z: number; power: number }
+/** Cooldowns for the HUD, and the blast charge (0..1, or -1 when not holding). */
+export type SkillStatus = Record<'dash' | 'guard' | 'blast', { left: number; total: number }> & { charge: number }
 
 /** Closing speed, in metres per second, from which a contact plays sound, particles and shake. */
 const BUMP_EFFECT_SPEED = 1.5
@@ -62,11 +62,12 @@ export class Game {
   private hits: OutgoingHit[] = []
   private ownFell = false
   private bumpCooldown = 0
+  private chargeClock = 0
   /** When the current round went live on this client (ms), 0 outside a live round. */
   private liveSince = 0
   private shrinkNotified = false
   private skills: OutgoingSkill[] = []
-  private readonly remoteFx = Object.fromEntries(SEATS.map(seat => [seat, { dash: 0, guard: 0 }])) as Record<Seat, { dash: number; guard: number }>
+  private readonly remoteFx = Object.fromEntries(SEATS.map(seat => [seat, { dash: 0, guard: 0, charge: -1 }])) as Record<Seat, { dash: number; guard: number; charge: number }>
   private readonly trailClock = Object.fromEntries(SEATS.map(seat => [seat, 0])) as Record<Seat, number>
 
   constructor(private readonly renderer: Renderer, private readonly audio: Audio, private readonly hooks: GameHooks) {
@@ -116,7 +117,6 @@ export class Game {
     this.phaseEndsAt = nowMs + state.phase_ends_in_ms
     const previous = this.state
     this.state = state
-    if (previous && previous.round === state.round) this.hpEffects(previous, state)
     if (state.phase !== 'live') this.liveSince = 0
     else if (previous?.phase !== 'live' || previous.round !== state.round || !this.liveSince) {
       this.liveSince = nowMs
@@ -178,36 +178,61 @@ export class Game {
   }
 
   /** Seconds until each skill is ready again, with its full cooldown, for the HUD. */
-  skillStatus(): Record<SkillKind, { left: number; total: number }> {
+  skillStatus(): SkillStatus {
     const { cooldown } = this.own
     return {
       dash: { left: cooldown.dash, total: SKILLS.dash.cooldown },
       guard: { left: cooldown.guard, total: SKILLS.guard.cooldown },
-      blast: { left: cooldown.blast, total: SKILLS.blast.cooldown },
+      blast: { left: cooldown.blast, total: this.own.blastTotal },
+      charge: this.own.charging && !this.own.out ? chargeLevel(this.own.chargeTime) : -1,
     }
   }
 
   /** The player pressed a skill. Does nothing while it recharges or the ball is not in play. */
-  useSkill(kind: SkillKind): void {
+  useSkill(kind: 'dash' | 'guard'): void {
     if (this.mode !== 'online' || !this.ownsLiveBall()) return
+    const wasCharging = this.own.charging
     const origin = this.own.use(kind)
     if (!origin) return
     this.urgent = true
-    this.skills.push({ kind, round: this.state!.round, ...origin })
+    this.skills.push({ kind, round: this.state!.round, power: 0, ...origin })
     this.skillEffects(this.role as Seat, kind, origin.x, origin.z, true)
+    if (wasCharging && !this.own.charging) this.chargeBroken()
+  }
+
+  /** The blast button went down: start holding. Returns whether a charge started. */
+  startBlast(): boolean {
+    if (this.mode !== 'online' || !this.ownsLiveBall() || !this.own.startCharge()) return false
+    this.urgent = true
+    this.chargeClock = 0
+    this.skills.push({ kind: 'charge', round: this.state!.round, power: 0, x: this.own.x, z: this.own.z })
+    this.audio.blip(320, 0.16)
+    return true
+  }
+
+  /** The blast button came up (or the charge ran out): fire what has been charged. */
+  releaseBlast(): void {
+    if (this.mode !== 'online' || !this.ownsLiveBall()) return
+    const shot = this.own.release()
+    if (!shot) return
+    this.urgent = true
+    this.skills.push({ kind: 'blast', round: this.state!.round, power: shot.level, x: shot.x, z: shot.z })
+    this.skillEffects(this.role as Seat, 'blast', shot.x, shot.z, true, shot.level)
   }
 
   /** A validated `skill` of another player: a blast may push the own ball; every kind is drawn. */
   skill(message: Skill): void {
     if (!this.state || message.round !== this.state.round || message.seat === this.role) return
     if (message.kind === 'blast' && this.ownsLiveBall()) {
-      const strength = this.own.receiveBlast(message.x, message.z)
+      const wasCharging = this.own.charging
+      const strength = this.own.receiveBlast(message.x, message.z, message.power)
       if (strength > 0) {
         this.urgent = true
-        this.cam.addShake(CONFIG.look.bumpShake * (1 + 2.5 * strength))
+        this.cam.addShake(CONFIG.look.bumpShake * (1 + 2.5 * strength * (0.5 + message.power)))
+        if (wasCharging && !this.own.charging) this.chargeBroken()
       }
     }
-    this.skillEffects(message.seat, message.kind, message.x, message.z, false)
+    this.skillEffects(message.seat, message.kind, message.x, message.z, false, message.power)
   }
 
   /** Back to the title orbit; the connection is already closed by the caller. */
@@ -239,11 +264,6 @@ export class Game {
     })
   }
 
-  /** Full health, from the server's rules. */
-  get maxHp(): number {
-    return this.rules?.max_hp ?? 100
-  }
-
   /** The floor radius now: the full arena until the shrink starts, outside a live round always full. */
   floor(): number {
     const full = this.rules?.arena_radius ?? 10
@@ -257,11 +277,15 @@ export class Game {
     const others = SEATS.filter(seat => seat !== this.role && this.inPlay(seat)).map(seat => ({ seat, ball: this.remote[seat] }))
     const wasOut = this.own.out
     const round = this.state!.round
+    const wasCharging = this.own.charging
     for (const contact of this.own.step(dt, others, this.floor())) {
       this.urgent = true
       this.hits.push({ to: contact.seat, round, jx: contact.jx, jz: contact.jz })
       if (contact.closing >= BUMP_EFFECT_SPEED) this.bumpEffects(this.remote[contact.seat], contact.closing)
     }
+    if (wasCharging && !this.own.charging && this.own.takeBroken()) this.chargeBroken()
+    // Held for the longest charge plus the grace time: it fires by itself.
+    if (this.own.charging && this.own.chargeTime >= BLAST.autoRelease) this.releaseBlast()
     if (this.own.out && !wasOut) {
       // Optimistic: fall at once; the server's ring-out event confirms it and scores the round.
       this.urgent = true
@@ -280,7 +304,6 @@ export class Game {
       for (const seat of SEATS) {
         this.balls[seat].root.visible = seat === 'p1' || seat === 'p2'
         this.balls[seat].update(this.spawn[seat].x, this.spawn[seat].z, 0, 0, false, frameSeconds, this.time)
-        this.balls[seat].setHpBar(0, false)
       }
     } else {
       const now = performance.now() / 1000
@@ -298,7 +321,6 @@ export class Game {
         const out = seatState.out || (mine ? this.own.out : this.remote[seat].reportedOutside(radius))
         this.balls[seat].update(ball.x, ball.z, ball.vx, ball.vz, out, frameSeconds, this.time)
         this.ballEffects(seat, mine, ball, out, frameSeconds)
-        this.balls[seat].setHpBar(seatState.hp / this.maxHp, state.phase === 'live' && seatState.playing && !out, this.cam.camera.quaternion)
         if (mine && seatState.playing) own = ball
       }
       this.cam.update(own, frameSeconds, this.reducedMotion)
@@ -333,22 +355,7 @@ export class Game {
     this.hits = []
     this.ownFell = false
     this.skills = []
-    for (const seat of SEATS) Object.assign(this.remoteFx[seat], { dash: 0, guard: 0 })
-  }
-
-  /** Red sparks on a ball that lost health; a hurt flash and shake for the own ball. */
-  private hpEffects(previous: RoomState, state: RoomState): void {
-    for (const seat of SEATS) {
-      const lost = previous.seats[seat].hp - state.seats[seat].hp
-      if (lost <= 0) continue
-      if (seat === this.role) {
-        this.hooks.hurt(lost)
-        this.cam.addShake(CONFIG.look.bumpShake * (0.5 + Math.min(lost, 30) / 20))
-      } else {
-        const ball = this.remote[seat]
-        this.fx.burst(new THREE.Vector3(ball.x, 0.9, ball.z), '#ff5c78', Math.round(8 + lost / 2), 6)
-      }
-    }
+    for (const seat of SEATS) Object.assign(this.remoteFx[seat], { dash: 0, guard: 0, charge: -1 })
   }
 
   /** Bump sparks grow with the closing speed; a hard hit adds a ring, a deeper sound and more shake. */
@@ -367,10 +374,13 @@ export class Game {
   }
 
   /** Sound, particles and rings for a skill; `mine` adds camera shake for the own ball's skills. */
-  private skillEffects(seat: Seat, kind: SkillKind, x: number, z: number, mine: boolean): void {
+  private skillEffects(seat: Seat, kind: SkillKind, x: number, z: number, mine: boolean, power = 0): void {
     const color = SEAT_COLORS[seat]
     const at = new THREE.Vector3(x, 0.6, z)
-    if (kind === 'dash') {
+    if (kind === 'charge') {
+      // Others see the reach grow on the floor; the own ball starts it in `startBlast()`.
+      if (!mine) { this.remoteFx[seat].charge = 0; this.audio.blip(260, 0.07) }
+    } else if (kind === 'dash') {
       this.audio.play('dash')
       this.fx.burst(at, '#ffffff', 18, 7)
       this.fx.shockwave(x, z, color, 1.8, 0.35)
@@ -382,14 +392,37 @@ export class Game {
       this.fx.shockwave(x, z, '#9fe8ff', 2.2, 0.5)
       if (!mine) this.remoteFx[seat].guard = SKILLS.guard.duration
     } else {
+      // A blast: bigger charge, bigger everything.
+      const { radius } = blastStats(power)
+      this.remoteFx[seat].charge = -1
       this.audio.play('blast')
-      this.fx.radial(at, color, 48, 13)
-      this.fx.burst(at, '#ffffff', 28, 10)
-      this.fx.burst(new THREE.Vector3(x, 1.2, z), '#ffd04a', 22, 8)
-      this.fx.shockwave(x, z, color, SKILLS.blast.radius, 0.6)
-      this.fx.shockwave(x, z, '#ffffff', SKILLS.blast.radius * 0.7, 0.4)
-      this.cam.addShake(CONFIG.look.bumpShake * (mine ? 3 : 1.6))
+      if (power > 0.6) this.audio.play('hard')
+      this.fx.radial(at, color, Math.round(36 + power * 50), 10 + power * 8)
+      this.fx.burst(at, '#ffffff', Math.round(20 + power * 24), 8 + power * 5)
+      this.fx.burst(new THREE.Vector3(x, 1.2, z), '#ffd04a', Math.round(14 + power * 24), 7 + power * 4)
+      this.fx.shockwave(x, z, color, radius, 0.5 + power * 0.25)
+      this.fx.shockwave(x, z, '#ffffff', radius * 0.7, 0.4 + power * 0.2)
+      if (power >= BLAST.pierce) this.fx.shockwave(x, z, '#ffd04a', radius * 1.05, 0.9)
+      this.cam.addShake(CONFIG.look.bumpShake * (mine ? 2 + power * 3 : 1 + power * 1.5))
     }
+  }
+
+  /** Specks drawn in toward a charging ball; the own ball also beeps, higher as it fills. */
+  private chargeEffects(seat: Seat, mine: boolean, ball: Motion, level: number, reach: number, dt: number): void {
+    const at = new THREE.Vector3(ball.x, 0.8, ball.z)
+    this.fx.implode(at, level >= 1 ? '#ffd04a' : SEAT_COLORS[seat], reach, level >= 1 ? 3 : 1 + Math.round(level * 2))
+    if (!mine) return
+    this.chargeClock -= dt
+    if (this.chargeClock > 0) return
+    this.chargeClock = level >= 1 ? 0.07 : 0.16 - level * 0.07
+    this.audio.blip(360 + level * 900, 0.1 + level * 0.05)
+  }
+
+  /** The held blast was broken by a hit or a blast. */
+  private chargeBroken(): void {
+    this.audio.play('bump')
+    this.fx.burst(new THREE.Vector3(this.own.x, 0.9, this.own.z), '#888899', 18, 6)
+    this.fx.shockwave(this.own.x, this.own.z, '#888899', 2.2, 0.3)
   }
 
   /** Dash glow, guard bubble and a speed trail behind a fast ball. */
@@ -401,7 +434,18 @@ export class Game {
     }
     const dashing = mine ? this.own.dashLeft > 0 : timers.dash > 0
     const guarding = mine ? this.own.guardLeft > 0 : timers.guard > 0
-    this.balls[seat].setState(dashing, guarding)
+    let charge = -1
+    if (mine) {
+      if (this.own.charging && !out) charge = chargeLevel(this.own.chargeTime)
+    } else if (timers.charge >= 0) {
+      timers.charge += dt
+      // A rival's charge that never ended in a blast (it was broken) fades after the longest hold.
+      if (timers.charge > BLAST.autoRelease + 0.3) timers.charge = -1
+      else if (!out) charge = chargeLevel(timers.charge)
+    }
+    const reach = blastStats(Math.max(charge, 0)).radius
+    this.balls[seat].setState(dashing, guarding, charge, reach)
+    if (charge >= 0) this.chargeEffects(seat, mine, ball, charge, reach, dt)
     this.trailClock[seat] -= dt
     if (out || this.trailClock[seat] > 0) return
     const speed = Math.hypot(ball.vx, ball.vz)
@@ -422,15 +466,6 @@ export class Game {
     const { kind, seat } = state.event
     if (kind === 'round') {
       this.audio.play('go')
-    } else if (kind === 'ko' && seat) {
-      // Out of health: the ball bursts where it stands, then falls like a ring-out.
-      const ball: Motion = seat === this.role ? this.own : this.remote[seat]
-      const at = new THREE.Vector3(ball.x, 0.8, ball.z)
-      this.audio.play('hard')
-      this.fx.radial(at, SEAT_COLORS[seat], 36, 11)
-      this.fx.burst(at, '#ffffff', 30, 9)
-      this.fx.shockwave(ball.x, ball.z, SEAT_COLORS[seat], 3.5, 0.6)
-      this.cam.addShake(CONFIG.look.bumpShake * 2)
     } else if (kind === 'ringout' && seat && seat !== this.role) {
       const ball = this.remote[seat]
       this.audio.play('fall')
