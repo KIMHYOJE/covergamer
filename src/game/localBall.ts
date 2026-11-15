@@ -66,7 +66,7 @@ export class OwnBall implements Motion {
    * it publishes stays outside until the server confirms; `BallView` draws the fall.
    */
   out = false
-  private rules: Rules = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3 }
+  private rules: Rules = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3, max_hp: 100 }
   private inputX = 0
   private inputZ = 0
   /** Seconds left of a dash and of a guard, and until each skill is ready again. */

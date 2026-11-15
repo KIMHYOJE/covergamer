@@ -62,7 +62,7 @@ test('four seats, spectators, isolated rooms, strict pose and hit relay, and sea
     const spectator = await open('ROOM');
     const other = await open('ELSE');
     assert.deepEqual([p1, p2, p3, p4, spectator, other].map(value => value.welcome.role), ['p1', 'p2', 'p3', 'p4', 'spectator', 'p1']);
-    assert.deepEqual(p1.welcome.rules, { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3 });
+    assert.deepEqual(p1.welcome.rules, { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3, max_hp: 100 });
     assert.deepEqual(p1.welcome.spawn, { p1: { x: 0, z: 4 }, p2: { x: 0, z: -4 }, p3: { x: 4, z: 0 }, p4: { x: -4, z: 0 } });
     const started = await p2.wait(live);
     assert.deepEqual(Object.values(started.seats).map(seat => seat.playing), [true, true, true, true]);
@@ -77,7 +77,7 @@ test('four seats, spectators, isolated rooms, strict pose and hit relay, and sea
     p1.ws.send(JSON.stringify({ type: 'pose', seq: 1.5, round, x: 0, z: 0, vx: 0, vz: 0, lat: 0 }));
     p1.pose(round, 0.5, 3.5, { vx: 1, vz: -2 });
     const relayed = await p2.wait(poseFrom('p1'));
-    assert.deepEqual(relayed, { type: 'pose', marker: 'ring-out-v3', room: 'ROOM', seat: 'p1', round, seq: 6, x: 0.5, z: 3.5, vx: 1, vz: -2, lat: 10 });
+    assert.deepEqual(relayed, { type: 'pose', marker: 'ring-out-v4', room: 'ROOM', seat: 'p1', round, seq: 6, x: 0.5, z: 3.5, vx: 1, vz: -2, lat: 10 });
     assert.equal(p2.messages.filter(poseFrom('p1')).length, 1, 'invalid poses must not be relayed');
     await spectator.wait(poseFrom('p1'));
     await p4.wait(poseFrom('p1'));
@@ -95,7 +95,7 @@ test('four seats, spectators, isolated rooms, strict pose and hit relay, and sea
     hit(spectator);
     hit(p1);
     hit(p1);
-    assert.deepEqual(await p2.wait(value => value.type === 'hit'), { type: 'hit', marker: 'ring-out-v3', room: 'ROOM', seat: 'p1', round, jx: 3, jz: -1 });
+    assert.deepEqual(await p2.wait(value => value.type === 'hit'), { type: 'hit', marker: 'ring-out-v4', room: 'ROOM', seat: 'p1', round, jx: 3, jz: -1 });
     await sleep(150);
     assert.equal(p2.messages.filter(value => value.type === 'hit').length, 1, 'invalid hits and a repeat within the interval must not be relayed');
     assert.equal([p1, p3, p4, spectator].some(value => value.messages.some(message => message.type === 'hit')), false, 'a hit goes only to its target');
@@ -104,16 +104,16 @@ test('four seats, spectators, isolated rooms, strict pose and hit relay, and sea
     assert.equal(isolated.seats.p1.connected, true);
     assert.equal(other.messages.some(value => value.type === 'pose'), false);
     other.ws.send(JSON.stringify({ type: 'ping', t: 1234 }));
-    assert.deepEqual(await other.wait(value => value.type === 'pong'), { type: 'pong', marker: 'ring-out-v3', room: 'ELSE', t: 1234 });
+    assert.deepEqual(await other.wait(value => value.type === 'pong'), { type: 'pong', marker: 'ring-out-v4', room: 'ELSE', t: 1234 });
     const closed = once(p1.ws, 'close');
     const resumed = await open('ROOM', p1.welcome.resume_token);
     assert.equal(resumed.welcome.role, 'p1');
     assert.equal((await closed)[0], 4001);
     resumed.ws.send('not json');
     const rejected = await resumed.wait(value => value.type === 'error');
-    assert.deepEqual(rejected, { type: 'error', marker: 'ring-out-v3', room: 'ROOM', code: 'invalid_message' });
+    assert.deepEqual(rejected, { type: 'error', marker: 'ring-out-v4', room: 'ROOM', code: 'invalid_message' });
     const response = await fetch(url.replace('ws:', 'http:').replace('/ws', '/healthz'));
-    assert.equal((await response.json()).marker, 'ring-out-v3');
+    assert.equal((await response.json()).marker, 'ring-out-v4');
   } finally {
     for (const value of clients) value.ws.terminate();
     child.kill('SIGTERM');
@@ -290,7 +290,7 @@ test('skills: relayed to others only, with cooldown, origin and round checks', {
     skill(a, 'blast');
     const relayed = await b.wait(skillFrom(roleA, 'blast'));
     assert.equal(relayed.round, start.round);
-    assert.equal(relayed.marker, 'ring-out-v3');
+    assert.equal(relayed.marker, 'ring-out-v4');
     assert.equal(a.messages.some(skillFrom(roleA, 'blast')), false, 'the sender does not get its own skill back');
 
     // The same kind again inside its cooldown is dropped; another kind goes through.
@@ -309,6 +309,69 @@ test('skills: relayed to others only, with cooldown, origin and round checks', {
     // After the rejected attempts, a valid guard still goes through (they did not use up its cooldown).
     skill(a, 'guard');
     await b.wait(skillFrom(roleA, 'guard'));
+  } finally {
+    for (const value of clients) value.ws.close();
+    child.kill('SIGTERM');
+    await once(child, 'exit');
+  }
+});
+
+test('health: hits and blasts cost hp, guard halves it, zero hp is a ko that scores the round', { timeout: 40000 }, async () => {
+  const { child, url } = await startServer();
+  const clients = [];
+  const open = async (...args) => { const value = await client(url, ...args); clients.push(value); return value; };
+  try {
+    const a = await open('HEALTH');
+    const b = await open('HEALTH');
+    const [start] = await Promise.all([a.wait(live), b.wait(live)]);
+    const [first, second] = a.welcome.role === 'p1' ? [a, b] : [b, a];
+    const roleFirst = first.welcome.role;
+    const roleSecond = second.welcome.role;
+    assert.equal(start.seats[roleFirst].hp, 100);
+    assert.equal(a.welcome.rules.max_hp, 100);
+    const hpOf = (who, seat) => value => value.type === 'room' && value.seats[seat].hp === who;
+    const hit = (from, to, jz) => from.ws.send(JSON.stringify({ type: 'hit', to, round: start.round, jx: 0, jz }));
+
+    // Both balls close together so the hit passes the reach check.
+    first.pose(start.round, 0, 0.9);
+    second.pose(start.round, 0, -0.9);
+    await sleep(100);
+
+    // A light touch is free; a hit of 11.5 costs (11.5 - 1.5) * 2.2 = 22.
+    hit(first, roleSecond, 1);
+    await sleep(250);
+    assert.equal(first.messages.findLast(value => value.type === 'room').seats[roleSecond].hp, 100);
+    hit(first, roleSecond, 11.5);
+    await first.wait(hpOf(78, roleSecond));
+
+    // Every ball in range of a blast pays: at 1.8 m the cost is 16 * (1 - 0.6 * 1.8 / 5.5) = 12.9, so 13.
+    second.pose(start.round, 0, -0.9);
+    first.ws.send(JSON.stringify({ type: 'skill', kind: 'blast', round: start.round, x: 0, z: 0.9 }));
+    await first.wait(hpOf(65, roleSecond));
+
+    // A guard halves the next hit: 22 becomes 11.
+    second.ws.send(JSON.stringify({ type: 'skill', kind: 'guard', round: start.round, x: 0, z: -0.9 }));
+    await sleep(150);
+    hit(first, roleSecond, 11.5);
+    await first.wait(hpOf(54, roleSecond));
+
+    // Hits keep coming until the hp is gone: a ko, and the other ball takes the point.
+    const koSeen = first.wait(value => value.type === 'room' && value.event.kind === 'ko' && value.event.seat === roleSecond, 8000);
+    for (let i = 0; i < 8; i += 1) {
+      await sleep(260);
+      first.pose(start.round, 0, 0.9);
+      hit(first, roleSecond, 17);
+    }
+    const ko = await koSeen;
+    assert.equal(ko.seats[roleSecond].hp, 0);
+    assert.equal(ko.seats[roleSecond].out, true);
+    assert.equal(ko.seats[roleFirst].out, false);
+    const point = await first.wait(value => value.type === 'room' && value.event.kind === 'point', 6000);
+    assert.equal(point.event.seat, roleFirst);
+
+    // The next round starts everyone at full health again.
+    const next = await first.wait(value => value.type === 'room' && value.phase === 'countdown' && value.round > start.round, 8000);
+    assert.equal(next.seats[roleSecond].hp, 100);
   } finally {
     for (const value of clients) value.ws.close();
     child.kill('SIGTERM');

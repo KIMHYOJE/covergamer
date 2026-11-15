@@ -100,6 +100,8 @@ export class BallView {
   private readonly marker: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
   private readonly body: THREE.MeshStandardMaterial
   private readonly bubble: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
+  private readonly hpBar = new THREE.Group()
+  private readonly hpFill: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
   private dashing = false
   private guarding = false
   private radius = 0.8
@@ -124,7 +126,18 @@ export class BallView {
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false, toneMapped: false }))
     this.marker.rotation.x = -Math.PI / 2
     this.marker.visible = false
-    this.root.add(this.mesh, this.shadow, this.marker, this.bubble)
+    // Health bar above the ball, turned to face the camera each frame.
+    const flat = { depthTest: false, depthWrite: false, toneMapped: false } as const
+    const track = new THREE.Mesh(new THREE.PlaneGeometry(1.75, 0.26), new THREE.MeshBasicMaterial({ color: '#120f2b', transparent: true, opacity: 0.85, ...flat }))
+    const fill = new THREE.PlaneGeometry(1.6, 0.15)
+    fill.translate(0.8, 0, 0)
+    this.hpFill = new THREE.Mesh(fill, new THREE.MeshBasicMaterial({ color: '#7ddc6a', ...flat }))
+    this.hpFill.position.set(-0.8, 0, 0.002)
+    track.renderOrder = 20
+    this.hpFill.renderOrder = 21
+    this.hpBar.add(track, this.hpFill)
+    this.hpBar.visible = false
+    this.root.add(this.mesh, this.shadow, this.marker, this.bubble, this.hpBar)
     this.setRadius(0.8)
   }
 
@@ -133,6 +146,17 @@ export class BallView {
     this.mesh.scale.setScalar(radius)
     this.shadow.scale.setScalar(radius * 0.95)
     this.marker.scale.setScalar(radius)
+  }
+
+  /** Health bar above the ball: `fraction` in 0..1, facing the camera by `facing`. */
+  setHpBar(fraction: number, show: boolean, facing?: THREE.Quaternion): void {
+    this.hpBar.visible = show
+    if (!show) return
+    const f = Math.min(1, Math.max(0, fraction))
+    this.hpFill.scale.x = Math.max(0.001, f)
+    this.hpFill.material.color.setHSL(f * 0.33, 0.8, 0.5)
+    this.hpBar.position.set(0, this.radius * 2 + 0.75, 0)
+    if (facing) this.hpBar.quaternion.copy(facing)
   }
 
   /** Dash glow and guard bubble, from this client's own skills or a rival's announced ones. */

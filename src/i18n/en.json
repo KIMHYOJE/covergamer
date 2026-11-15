@@ -63,5 +63,6 @@
   "skill.guard": "Guard",
   "skill.blast": "Blast",
   "status.shrink": "ARENA SHRINKING!",
-  "status.shrink.sub": "The red zone pushes you toward the centre"
+  "status.shrink.sub": "The red zone pushes you toward the centre",
+  "hud.hp": "HP"
 }

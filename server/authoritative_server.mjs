@@ -8,7 +8,7 @@ import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
-const MARKER = 'ring-out-v3';
+const MARKER = 'ring-out-v4';
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
 const STATIC_ROOT = resolve(process.env.STATIC_ROOT || join(dirname(fileURLToPath(import.meta.url)), '../dist'));
@@ -59,6 +59,17 @@ const HIT_MIN_INTERVAL_MS = 150;
 // relays them. Each client decides for its own ball whether a blast reaches it.
 const SKILL_COOLDOWN_MS = { dash: 1500, guard: 4000, blast: 4000 };
 const SKILL_REACH_SLACK = 1.5;
+// Health. Every ball starts a round with MAX_HP. A relayed hit costs the target (impulse - HIT_DAMAGE_FREE)
+// * HIT_DAMAGE_PER_SPEED, so a light touch is free and a dash ram hurts; a blast costs up to BLAST_DAMAGE,
+// less with distance. A guard halves damage for GUARD_MS (the client's 1.3 s plus slack for latency).
+// A ball at 0 is out of the round ("ko"), like a ring-out.
+const MAX_HP = 100;
+const HIT_DAMAGE_FREE = 1.5;
+const HIT_DAMAGE_PER_SPEED = 2.2;
+const BLAST_RADIUS = 5.5;
+const BLAST_DAMAGE = 16;
+const GUARD_MS = 1600;
+const GUARD_DAMAGE_SCALE = 0.5;
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -107,7 +118,7 @@ function send(ws, payload) {
 function emptySeat() {
   // `playing`: took part when the current round went live. `out`: left the arena or the room this round.
   // `poseAt`: when the last pose arrived (or the round went live). `hitAt`: last relayed hit per target.
-  return { token: '', socket: null, disconnectedAt: 0, score: 0, playing: false, out: false, poseSeq: 0, pose: null, poseAt: 0, hitAt: {}, skillAt: {} };
+  return { token: '', socket: null, disconnectedAt: 0, score: 0, playing: false, out: false, poseSeq: 0, pose: null, poseAt: 0, hitAt: {}, skillAt: {}, hp: MAX_HP, guardUntil: 0 };
 }
 
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -188,7 +199,7 @@ class Room {
     ws.role = role;
     const resume = role === 'spectator' ? '' : this.seats[role].token;
     send(ws, { type: 'welcome', marker: MARKER, room: this.code, role, resume_token: resume,
-      rules: { arena_radius: ARENA_RADIUS, ball_radius: BALL_RADIUS, accel: ACCEL, damping: DAMPING, max_speed: MAX_SPEED, restitution: RESTITUTION, win_score: WIN_SCORE },
+      rules: { arena_radius: ARENA_RADIUS, ball_radius: BALL_RADIUS, accel: ACCEL, damping: DAMPING, max_speed: MAX_SPEED, restitution: RESTITUTION, win_score: WIN_SCORE, max_hp: MAX_HP },
       spawn: SPAWN });
     if (resumedMidRound) this.checkRoundEnd(Date.now());
     this.tryStart(Date.now());
@@ -263,6 +274,7 @@ class Room {
     if (!this.withinReach(side, target, now) || now - (seat.hitAt[target] || 0) < HIT_MIN_INTERVAL_MS) return;
     seat.hitAt[target] = now;
     send(this.seats[target].socket, { type: 'hit', marker: MARKER, room: this.code, seat: side, round: this.round, jx, jz });
+    this.damage(target, Math.max(0, Math.hypot(jx, jz) - HIT_DAMAGE_FREE) * HIT_DAMAGE_PER_SPEED, now);
   }
 
   /**
@@ -300,6 +312,30 @@ class Room {
       if (other !== side && this.connected(other)) sendText(this.seats[other].socket, text);
     }
     for (const socket of this.observers) sendText(socket, text);
+    if (kind === 'guard') seat.guardUntil = now + GUARD_MS;
+    if (kind === 'blast') {
+      // The blast costs every other ball in range, by where the room last saw it.
+      for (const other of SEATS) {
+        if (other === side || !this.connected(other)) continue;
+        const target = this.seats[other];
+        const at = target.pose || SPAWN[other];
+        const distance = Math.hypot(at.x - x, at.z - z);
+        if (distance <= BLAST_RADIUS) this.damage(other, BLAST_DAMAGE * (1 - 0.6 * (distance / BLAST_RADIUS)), now);
+      }
+    }
+  }
+
+  /** Takes health from a ball in play; at 0 the ball is out of the round (event `ko`). */
+  damage(side, amount, now) {
+    const seat = this.seats[side];
+    if (this.phase !== 'live' || !seat.playing || seat.out) return;
+    const taken = Math.round(amount * (now < seat.guardUntil ? GUARD_DAMAGE_SCALE : 1));
+    if (taken <= 0) return;
+    seat.hp = Math.max(0, seat.hp - taken);
+    if (seat.hp > 0) { this.broadcast(); return; }
+    seat.out = true;
+    this.emit('ko', side);
+    this.checkRoundEnd(now);
   }
 
   poseMessage(side, pose) {
@@ -328,7 +364,7 @@ class Room {
 
   startRound(now) {
     this.round += 1;
-    for (const side of SEATS) Object.assign(this.seats[side], { playing: false, out: false, pose: null, poseAt: 0, hitAt: {}, skillAt: {} });
+    for (const side of SEATS) Object.assign(this.seats[side], { playing: false, out: false, pose: null, poseAt: 0, hitAt: {}, skillAt: {}, hp: MAX_HP, guardUntil: 0 });
     this.setPhase('countdown', COUNTDOWN_MS, now);
   }
 
@@ -381,7 +417,7 @@ class Room {
     if (!this.phaseEndsAt || now < this.phaseEndsAt) return;
     if (this.phase === 'countdown') {
       // Everyone seated when the round goes live plays it; later arrivals wait for the next one.
-      for (const side of this.connectedSeats()) Object.assign(this.seats[side], { playing: true, poseAt: now });
+      for (const side of this.connectedSeats()) Object.assign(this.seats[side], { playing: true, poseAt: now, hp: MAX_HP, guardUntil: 0 });
       this.setPhase('live', 0, now);
       this.emit('round', '');
     } else {
@@ -401,7 +437,7 @@ class Room {
     const seats = {};
     for (const side of SEATS) {
       const seat = this.seats[side];
-      seats[side] = { connected: this.connected(side), playing: seat.playing, out: seat.out, score: seat.score };
+      seats[side] = { connected: this.connected(side), playing: seat.playing, out: seat.out, score: seat.score, hp: seat.hp };
     }
     return {
       type: 'room', marker: MARKER, room: this.code, seq: this.seq, round: this.round,

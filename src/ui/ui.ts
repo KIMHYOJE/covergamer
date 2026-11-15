@@ -20,7 +20,7 @@ export type UiActions = {
   settings(patch: Partial<SaveData>): void
 }
 
-export type HudView = { room: string; role: Role; status: NetStatus; state: RoomState | null; phaseSeconds: number }
+export type HudView = { room: string; role: Role; status: NetStatus; state: RoomState | null; phaseSeconds: number; maxHp: number }
 
 const ICON = {
   ring: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="3"/><circle cx="9" cy="12" r="3" fill="currentColor"/><circle cx="16" cy="11" r="2.2" fill="#fff" opacity=".8"/></svg>',
@@ -47,6 +47,7 @@ export class Ui {
   private lastMethod = ''
   private goUntil = 0
   private shrinkUntil = 0
+  private hurtTimer = 0
   private copiedUntil = 0
 
   constructor(
@@ -122,6 +123,17 @@ export class Ui {
   }
 
   /** A short "GO!" after each round starts. */
+  /** Flashes the screen edges red when the own ball loses health. */
+  hurt(amount: number): void {
+    const flash = this.q('.hurt-flash')
+    flash.style.setProperty('--hurt', String(Math.min(1, 0.35 + amount / 30)))
+    flash.classList.remove('is-hurt')
+    void flash.offsetWidth
+    flash.classList.add('is-hurt')
+    window.clearTimeout(this.hurtTimer)
+    this.hurtTimer = window.setTimeout(() => flash.classList.remove('is-hurt'), 500)
+  }
+
   /** Shows the shrinking-arena notice for a few seconds. */
   shrink(): void {
     this.shrinkUntil = performance.now() + 3000
@@ -152,6 +164,13 @@ export class Ui {
       side.hidden = (seat === 'p3' || seat === 'p4') && !(value && (value.connected || value.score > 0))
       side.classList.toggle('is-away', !!value && !value.connected)
       side.classList.toggle('is-out', !!value && value.out && state?.phase === 'live')
+      this.setHp(this.q(`[data-hp="${seat}"]`), seat, value ? value.hp / view.maxHp : 1)
+    }
+    const mine = role !== 'spectator' ? state?.seats[role] : undefined
+    this.q('.hp-main').classList.toggle('is-active', !!mine && (state?.phase === 'live' || state?.phase === 'countdown'))
+    if (mine) {
+      this.setHp(this.q('[data-hp="own"]'), 'own', mine.hp / view.maxHp)
+      this.set('hp-own', `${t('hud.hp')} ${mine.hp}`)
     }
     this.q('.hud-status').dataset.status = view.status === 'online' ? (state?.phase ?? 'waiting') : 'offline'
 
@@ -195,6 +214,16 @@ export class Ui {
       button.classList.toggle('is-ready', left <= 0)
       this.set(`skill-${kind}`, left > 0 ? String(Math.ceil(left)) : '')
     }
+  }
+
+  /** Width and colour of a health bar, written only when they change. */
+  private setHp(bar: HTMLElement, key: string, fraction: number): void {
+    const f = Math.min(1, Math.max(0, fraction))
+    const value = `${Math.round(f * 100)}`
+    if (this.hudCache.get(`hp-${key}`) === value) return
+    this.hudCache.set(`hp-${key}`, value)
+    bar.style.width = `${value}%`
+    bar.style.background = `hsl(${Math.round(f * 120)}, 80%, 52%)`
   }
 
   private renderHint(): void {
@@ -398,7 +427,7 @@ export class Ui {
     const toggle = (setting: string, label: string) =>
       `<div class="row"><span data-i18n="${label}"></span><button data-nav class="toggle" data-setting="${setting}" aria-pressed="false"><i></i><span></span></button></div>`
     const side = (seat: Seat) =>
-      `<div class="hud-side hud-side-${seat}" style="--seat:${SEAT_COLORS[seat]}"><i></i><span data-slot="name-${seat}"></span><b data-slot="score-${seat}"></b></div>`
+      `<div class="hud-side hud-side-${seat}" style="--seat:${SEAT_COLORS[seat]}"><i></i><span data-slot="name-${seat}"></span><b data-slot="score-${seat}"></b><div class="hp"><div data-hp="${seat}"></div></div></div>`
     return /* html */ `
 <section class="screen screen-boot is-active" data-screen="boot">
   <div class="boot-logo" data-i18n="game.title"></div>
@@ -438,7 +467,9 @@ export class Ui {
     <button class="hud-pause" data-action="menu" data-i18n-label="menu.title">${ICON.menu}</button>
   </div>
   <div class="hud-banner"><b data-slot="banner"></b><span data-slot="banner-sub"></span></div>
+  <div class="hurt-flash"></div>
   <div class="hint"><span></span></div>
+  <div class="hp-main"><div class="hp-track"><div data-hp="own"></div></div><b data-slot="hp-own"></b></div>
   <div class="skills">
     <button class="skill" data-skill="dash" tabindex="-1"><kbd>F</kbd><b data-i18n="skill.dash"></b><em data-slot="skill-dash"></em></button>
     <button class="skill" data-skill="guard" tabindex="-1"><kbd>E</kbd><b data-i18n="skill.guard"></b><em data-slot="skill-guard"></em></button>

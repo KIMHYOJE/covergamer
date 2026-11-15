@@ -6,9 +6,9 @@ import { floorRadius, HIT_WINDOW, OwnBall, SHRINK, SKILLS } from '../src/game/lo
 import { bootstrapUrl, validEndpoint } from '../src/net/connection'
 import { BUILD, decode, generateRoom, sanitizeRoom, validRoom, type Pose } from '../src/net/protocol'
 
-const RULES = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3 }
+const RULES = { arena_radius: 10, ball_radius: 0.8, accel: 13, damping: 0.55, max_speed: 9, restitution: 0.95, win_score: 3, max_hp: 100 }
 const SPAWN = { p1: { x: 0, z: 4 }, p2: { x: 0, z: -4 }, p3: { x: 4, z: 0 }, p4: { x: -4, z: 0 } }
-const seat = (patch: Record<string, unknown> = {}) => ({ connected: true, playing: true, out: false, score: 0, ...patch })
+const seat = (patch: Record<string, unknown> = {}) => ({ connected: true, playing: true, out: false, score: 0, hp: 100, ...patch })
 const room = (patch: Record<string, unknown> = {}) => JSON.stringify({
   type: 'room', marker: BUILD, room: 'ROOM1', seq: 1, round: 1, phase: 'live', phase_ends_in_ms: 0,
   seats: { p1: seat(), p2: seat(), p3: seat({ connected: false, playing: false }), p4: seat({ connected: false, playing: false }) },
@@ -361,5 +361,23 @@ describe('dash ram', () => {
     own.use('dash')
     const hits = own.step(1 / 60, [{ seat: 'p2', ball: { x: 1.6, z: 0, vx: 0, vz: 0 } }])
     expect(Math.hypot(hits[0].jx, hits[0].jz)).toBeGreaterThanOrEqual(SKILLS.dash.minPush - 1e-6)
+  })
+})
+
+describe('health on the wire', () => {
+  it('room seats carry bounded hp and the ko event is accepted', () => {
+    const ko = room({ event: { seq: 2, kind: 'ko', seat: 'p2' }, seats: { p1: seat(), p2: seat({ hp: 0, out: true }), p3: seat({ connected: false, playing: false }), p4: seat({ connected: false, playing: false }) } })
+    expect(decode(ko, 'ROOM1', -1)?.type).toBe('room')
+    const missing = JSON.parse(room())
+    delete missing.seats.p1.hp
+    expect(decode(JSON.stringify(missing), 'ROOM1', -1)).toBeNull()
+    expect(decode(room({ seats: { p1: seat({ hp: -1 }), p2: seat(), p3: seat(), p4: seat() } }), 'ROOM1', -1)).toBeNull()
+    expect(decode(room({ seats: { p1: seat({ hp: 1e6 }), p2: seat(), p3: seat(), p4: seat() } }), 'ROOM1', -1)).toBeNull()
+  })
+
+  it('welcome rules need a sane max_hp', () => {
+    expect(decode(welcome({ rules: { ...RULES, max_hp: 0 } }), 'ROOM1', -1)).toBeNull()
+    expect(decode(welcome({ rules: { ...RULES, max_hp: 100.5 } }), 'ROOM1', -1)).toBeNull()
+    expect(decode(welcome({ rules: { ...RULES, max_hp: undefined } }), 'ROOM1', -1)).toBeNull()
   })
 })

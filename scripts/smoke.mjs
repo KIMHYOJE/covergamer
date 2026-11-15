@@ -114,7 +114,7 @@ try {
   const port = await serverPort()
   const pagePort = latency > 0 ? await delayProxy(port, latency) : port
   writeFileSync(join(site, 'multiplayer', 'bootstrap.json'), JSON.stringify({
-    version: 1, build: 'ring-out-v3', signalingUrl: `ws://127.0.0.1:${pagePort}/ws`, iceTransportPolicy: 'all',
+    version: 1, build: 'ring-out-v4', signalingUrl: `ws://127.0.0.1:${pagePort}/ws`, iceTransportPolicy: 'all',
   }))
   const base = `http://127.0.0.1:${pagePort}/`
   // Prefer Playwright's bundled Chromium; fall back to an installed Google Chrome.
@@ -196,7 +196,7 @@ try {
   // The committed bootstrap has no endpoint: Play Online must explain that and still offer Leave.
   const offline = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: 'en-US' })
   await offline.route('**/multiplayer/bootstrap.json', route => route.fulfill({
-    contentType: 'application/json', body: JSON.stringify({ version: 1, build: 'ring-out-v3', signalingUrl: '' }),
+    contentType: 'application/json', body: JSON.stringify({ version: 1, build: 'ring-out-v4', signalingUrl: '' }),
   }))
   const offlinePage = await openGame(offline, `${base}?room=SMOKE4`, errors)
   await offlinePage.click('[data-action="play"]')

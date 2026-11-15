@@ -4,17 +4,18 @@
  * scores, and decides every ring-out. The client validates everything it receives before the game
  * reads it.
  */
-export const BUILD = 'ring-out-v3'
+export const BUILD = 'ring-out-v4'
 export const MAX_MESSAGE_BYTES = 4096
 
 export type Seat = 'p1' | 'p2' | 'p3' | 'p4'
 export type Role = Seat | 'spectator'
 export type Phase = 'waiting' | 'countdown' | 'live' | 'point' | 'ended'
 /** `round`: a round went live. `ringout`: `seat` left the arena. `point`: `seat` (or nobody) took the round. `match`: `seat` won. */
-export type EventKind = '' | 'round' | 'ringout' | 'point' | 'match'
-export type Rules = { arena_radius: number; ball_radius: number; accel: number; damping: number; max_speed: number; restitution: number; win_score: number }
+export type EventKind = '' | 'round' | 'ringout' | 'ko' | 'point' | 'match'
+export type Rules = { arena_radius: number; ball_radius: number; accel: number; damping: number; max_speed: number; restitution: number; win_score: number; max_hp: number }
 export type Point = { x: number; z: number }
-export type SeatState = { connected: boolean; playing: boolean; out: boolean; score: number }
+/** `hp`: health left this round, 0 to `rules.max_hp`; a ball at 0 is out (`ko`). */
+export type SeatState = { connected: boolean; playing: boolean; out: boolean; score: number; hp: number }
 
 export type Welcome = { type: 'welcome'; marker: string; room: string; role: Role; resume_token: string; rules: Rules; spawn: Record<Seat, Point> }
 /** Room state. The server sends it only when something changes; `event.seq` identifies each event once. */
@@ -36,7 +37,7 @@ export type Message = Welcome | RoomState | Pose | Hit | Skill | Pong | ServiceE
 
 export const SEATS: readonly Seat[] = ['p1', 'p2', 'p3', 'p4']
 const PHASES: readonly string[] = ['waiting', 'countdown', 'live', 'point', 'ended']
-const EVENTS: readonly string[] = ['', 'round', 'ringout', 'point', 'match']
+const EVENTS: readonly string[] = ['', 'round', 'ringout', 'ko', 'point', 'match']
 const TYPES: readonly string[] = ['welcome', 'room', 'pose', 'hit', 'skill', 'pong', 'error']
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const POSITION_LIMIT = 100
@@ -77,10 +78,10 @@ export function parseEnvelope(text: string): Raw | null {
 
 function validRules(raw: unknown): raw is Rules {
   if (!isObject(raw)) return false
-  const { arena_radius: arena, ball_radius: ball, accel, damping, max_speed: max, restitution, win_score: win } = raw
+  const { arena_radius: arena, ball_radius: ball, accel, damping, max_speed: max, restitution, win_score: win, max_hp: maxHp } = raw
   return within(arena, POSITION_LIMIT) && arena > 0 && within(ball, 10) && ball > 0 && ball < arena
     && within(accel, 200) && accel > 0 && within(damping, 20) && damping >= 0 && within(max, SPEED_LIMIT) && max > 0
-    && within(restitution, 1) && restitution >= 0 && isUint(win) && win > 0 && win <= 99
+    && within(restitution, 1) && restitution >= 0 && isUint(win) && win > 0 && win <= 99 && isUint(maxHp) && maxHp > 0 && maxHp <= 1000
 }
 
 function validSpawn(raw: unknown, arena: number): raw is Record<Seat, Point> {
@@ -91,7 +92,7 @@ function validSpawn(raw: unknown, arena: number): raw is Record<Seat, Point> {
 }
 
 function validSeat(raw: unknown): raw is SeatState {
-  return isObject(raw) && typeof raw.connected === 'boolean' && typeof raw.playing === 'boolean' && typeof raw.out === 'boolean' && isUint(raw.score)
+  return isObject(raw) && typeof raw.connected === 'boolean' && typeof raw.playing === 'boolean' && typeof raw.out === 'boolean' && isUint(raw.score) && isUint(raw.hp) && raw.hp <= 1000
 }
 
 /**

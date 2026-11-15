@@ -17,6 +17,8 @@ export type GameHooks = {
   event(kind: EventKind, state: RoomState): void
   /** The arena starts shrinking. */
   shrink(): void
+  /** The own ball lost `amount` health. */
+  hurt(amount: number): void
 }
 
 /** The own ball as `main.ts` publishes it. `urgent` asks for a pose now (after a bump or the edge). */
@@ -114,6 +116,7 @@ export class Game {
     this.phaseEndsAt = nowMs + state.phase_ends_in_ms
     const previous = this.state
     this.state = state
+    if (previous && previous.round === state.round) this.hpEffects(previous, state)
     if (state.phase !== 'live') this.liveSince = 0
     else if (previous?.phase !== 'live' || previous.round !== state.round || !this.liveSince) {
       this.liveSince = nowMs
@@ -236,6 +239,11 @@ export class Game {
     })
   }
 
+  /** Full health, from the server's rules. */
+  get maxHp(): number {
+    return this.rules?.max_hp ?? 100
+  }
+
   /** The floor radius now: the full arena until the shrink starts, outside a live round always full. */
   floor(): number {
     const full = this.rules?.arena_radius ?? 10
@@ -272,6 +280,7 @@ export class Game {
       for (const seat of SEATS) {
         this.balls[seat].root.visible = seat === 'p1' || seat === 'p2'
         this.balls[seat].update(this.spawn[seat].x, this.spawn[seat].z, 0, 0, false, frameSeconds, this.time)
+        this.balls[seat].setHpBar(0, false)
       }
     } else {
       const now = performance.now() / 1000
@@ -289,6 +298,7 @@ export class Game {
         const out = seatState.out || (mine ? this.own.out : this.remote[seat].reportedOutside(radius))
         this.balls[seat].update(ball.x, ball.z, ball.vx, ball.vz, out, frameSeconds, this.time)
         this.ballEffects(seat, mine, ball, out, frameSeconds)
+        this.balls[seat].setHpBar(seatState.hp / this.maxHp, state.phase === 'live' && seatState.playing && !out, this.cam.camera.quaternion)
         if (mine && seatState.playing) own = ball
       }
       this.cam.update(own, frameSeconds, this.reducedMotion)
@@ -324,6 +334,21 @@ export class Game {
     this.ownFell = false
     this.skills = []
     for (const seat of SEATS) Object.assign(this.remoteFx[seat], { dash: 0, guard: 0 })
+  }
+
+  /** Red sparks on a ball that lost health; a hurt flash and shake for the own ball. */
+  private hpEffects(previous: RoomState, state: RoomState): void {
+    for (const seat of SEATS) {
+      const lost = previous.seats[seat].hp - state.seats[seat].hp
+      if (lost <= 0) continue
+      if (seat === this.role) {
+        this.hooks.hurt(lost)
+        this.cam.addShake(CONFIG.look.bumpShake * (0.5 + Math.min(lost, 30) / 20))
+      } else {
+        const ball = this.remote[seat]
+        this.fx.burst(new THREE.Vector3(ball.x, 0.9, ball.z), '#ff5c78', Math.round(8 + lost / 2), 6)
+      }
+    }
   }
 
   /** Bump sparks grow with the closing speed; a hard hit adds a ring, a deeper sound and more shake. */
@@ -397,6 +422,15 @@ export class Game {
     const { kind, seat } = state.event
     if (kind === 'round') {
       this.audio.play('go')
+    } else if (kind === 'ko' && seat) {
+      // Out of health: the ball bursts where it stands, then falls like a ring-out.
+      const ball: Motion = seat === this.role ? this.own : this.remote[seat]
+      const at = new THREE.Vector3(ball.x, 0.8, ball.z)
+      this.audio.play('hard')
+      this.fx.radial(at, SEAT_COLORS[seat], 36, 11)
+      this.fx.burst(at, '#ffffff', 30, 9)
+      this.fx.shockwave(ball.x, ball.z, SEAT_COLORS[seat], 3.5, 0.6)
+      this.cam.addShake(CONFIG.look.bumpShake * 2)
     } else if (kind === 'ringout' && seat && seat !== this.role) {
       const ball = this.remote[seat]
       this.audio.play('fall')

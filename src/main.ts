@@ -202,6 +202,7 @@ async function boot(): Promise<void> {
       if (kind === 'round') ui.go()
     },
     shrink: () => ui.shrink(),
+    hurt: amount => ui.hurt(amount),
   })
   game.reducedMotion = save.data.reducedMotion
   if (import.meta.env.DEV) {
@@ -232,7 +233,7 @@ async function boot(): Promise<void> {
       publish(performance.now())
       g.render(frameSeconds)
       if (active) {
-        ui.updateHud({ room, role: g.role, status, state: g.state, phaseSeconds: g.phaseSeconds() })
+        ui.updateHud({ room, role: g.role, status, state: g.state, phaseSeconds: g.phaseSeconds(), maxHp: g.maxHp })
         ui.updateSkills(g.skillStatus(), g.role !== 'spectator' && (g.state?.phase === 'live' || g.state?.phase === 'countdown'))
       }
       input.endFrame()

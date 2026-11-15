@@ -63,5 +63,6 @@
   "skill.guard": "护盾",
   "skill.blast": "爆破",
   "status.shrink": "场地正在缩小！",
-  "status.shrink.sub": "红色区域会把你推向中心"
+  "status.shrink.sub": "红色区域会把你推向中心",
+  "hud.hp": "体力"
 }
