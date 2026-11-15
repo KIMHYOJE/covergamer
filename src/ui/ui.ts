@@ -46,6 +46,7 @@ export class Ui {
   private navRepeat = 0
   private lastMethod = ''
   private goUntil = 0
+  private shrinkUntil = 0
   private copiedUntil = 0
 
   constructor(
@@ -121,6 +122,11 @@ export class Ui {
   }
 
   /** A short "GO!" after each round starts. */
+  /** Shows the shrinking-arena notice for a few seconds. */
+  shrink(): void {
+    this.shrinkUntil = performance.now() + 3000
+  }
+
   go(): void {
     this.goUntil = performance.now() + 700
   }
@@ -159,7 +165,10 @@ export class Ui {
     } else if (state.phase === 'countdown') banner = String(Math.max(1, Math.ceil(view.phaseSeconds)))
     else if (state.phase === 'live' && performance.now() < this.goUntil) banner = t('status.go')
     else if (state.phase === 'live' && role !== 'spectator' && state.seats[role].playing && state.seats[role].out) banner = t('status.out')
-    else if (state.phase === 'point') {
+    else if (state.phase === 'live' && performance.now() < this.shrinkUntil) {
+      banner = t('status.shrink')
+      sub = t('status.shrink.sub')
+    } else if (state.phase === 'point') {
       const scorer = state.event.kind === 'point' ? state.event.seat : ''
       banner = t('status.ringout')
       sub = scorer === '' ? t('status.draw') : scorer === role ? t('status.point.you') : t('status.point', { player: name(scorer) })

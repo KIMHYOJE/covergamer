@@ -201,6 +201,7 @@ async function boot(): Promise<void> {
     event: kind => {
       if (kind === 'round') ui.go()
     },
+    shrink: () => ui.shrink(),
   })
   game.reducedMotion = save.data.reducedMotion
   if (import.meta.env.DEV) {

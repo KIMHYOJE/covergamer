@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { RemoteTrack } from '../src/game/balls'
 import { cameraSide, stickToWorld } from '../src/game/camera'
 import { CONFIG } from '../src/game/config'
-import { HIT_WINDOW, OwnBall, SKILLS } from '../src/game/localBall'
+import { floorRadius, HIT_WINDOW, OwnBall, SHRINK, SKILLS } from '../src/game/localBall'
 import { bootstrapUrl, validEndpoint } from '../src/net/connection'
 import { BUILD, decode, generateRoom, sanitizeRoom, validRoom, type Pose } from '../src/net/protocol'
 
@@ -284,5 +284,82 @@ describe('skills', () => {
     const hits = a.step(1 / 60, [{ seat: 'p2', ball: { x: 1.2, z: 0, vx: -RULES.max_speed * 1.9, vz: 0 } }])
     expect(hits.length).toBe(1)
     expect(Math.hypot(hits[0].jx, hits[0].jz)).toBeLessThanOrEqual(RULES.max_speed * 2)
+  })
+})
+
+describe('shrinking arena', () => {
+  const ball = () => {
+    const own = new OwnBall()
+    own.configure(RULES)
+    return own
+  }
+
+  it('the floor holds its size, then shrinks to a minimum', () => {
+    expect(floorRadius(10, 0)).toBe(10)
+    expect(floorRadius(10, SHRINK.delay)).toBe(10)
+    expect(floorRadius(10, SHRINK.delay + 5)).toBeCloseTo(10 - 5 * SHRINK.rate, 5)
+    expect(floorRadius(10, 1000)).toBe(SHRINK.minRadius)
+  })
+
+  it('a ball standing still on the shrunk part drifts inward and is never put out', () => {
+    const own = ball()
+    own.place(9, 0)
+    for (let t = 0; t < 30; t += 1 / 60) own.step(1 / 60, [], SHRINK.minRadius)
+    expect(own.out).toBe(false)
+    expect(Math.hypot(own.x, own.z)).toBeLessThan(SHRINK.minRadius + 1)
+  })
+
+  it('the pull is weaker than the ball\'s own acceleration, so a ball can still push out against it', () => {
+    expect(SHRINK.pull).toBeLessThan(RULES.accel)
+    const own = ball()
+    own.place(6, 0)
+    own.setInput(1, 0)
+    for (let t = 0; t < 4; t += 1 / 60) own.step(1 / 60, [], SHRINK.minRadius)
+    expect(own.x).toBeGreaterThan(6)
+  })
+
+  it('a ball pushed over the real edge is still out', () => {
+    const own = ball()
+    own.place(9, 0)
+    own.vx = 8
+    for (let t = 0; t < 1; t += 1 / 60) own.step(1 / 60, [], SHRINK.minRadius)
+    expect(own.out).toBe(true)
+  })
+})
+
+describe('dash ram', () => {
+  it('a dashing ball pushes the other harder and keeps more speed than a plain bump', () => {
+    const bump = (dash: boolean) => {
+      const own = new OwnBall()
+      own.configure(RULES)
+      own.place(0, 0)
+      own.setInput(1, 0)
+      for (let t = 0; t < 4; t += 1 / 60) own.step(1 / 60, [])
+      own.place(0, 0)
+      own.setInput(1, 0)
+      own.vx = 6
+      if (dash) own.use('dash')
+      const before = own.vx
+      const hits = own.step(1 / 60, [{ seat: 'p2', ball: { x: 1.6, z: 0, vx: 0, vz: 0 } }])
+      return { push: Math.hypot(hits[0]?.jx ?? 0, hits[0]?.jz ?? 0), kept: own.vx / before }
+    }
+    const plain = bump(false)
+    const ram = bump(true)
+    expect(ram.push).toBeGreaterThan(plain.push)
+    expect(ram.push).toBeLessThanOrEqual(RULES.max_speed * 2)
+    expect(ram.kept).toBeGreaterThan(plain.kept)
+  })
+
+  it('a ram always pushes at least the minimum', () => {
+    const own = new OwnBall()
+    own.configure(RULES)
+    own.place(0, 0)
+    own.setInput(1, 0)
+    for (let t = 0; t < 4; t += 1 / 60) own.step(1 / 60, [])
+    own.place(0, 0)
+    own.vx = 2
+    own.use('dash')
+    const hits = own.step(1 / 60, [{ seat: 'p2', ball: { x: 1.6, z: 0, vx: 0, vz: 0 } }])
+    expect(Math.hypot(hits[0].jx, hits[0].jz)).toBeGreaterThanOrEqual(SKILLS.dash.minPush - 1e-6)
   })
 })

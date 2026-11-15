@@ -45,6 +45,9 @@ export class Arena {
   readonly sun: THREE.DirectionalLight
   private readonly disc: THREE.Group
   private radius = 0
+  private readonly danger: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
+  private readonly edge: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
+  private floor = Infinity
 
   constructor(shadowMapSize: number) {
     this.scene.background = new THREE.Color('#0d0b24')
@@ -62,13 +65,42 @@ export class Arena {
     this.scene.add(this.sun, this.sun.target)
     this.disc = new THREE.Group()
     this.scene.add(this.disc)
+    const glow = (opacity: number) => new THREE.MeshBasicMaterial({ color: '#ff3355', transparent: true, opacity, depthWrite: false, toneMapped: false, side: THREE.DoubleSide })
+    this.danger = new THREE.Mesh(new THREE.RingGeometry(1, 2, 8), glow(0.3))
+    this.edge = new THREE.Mesh(new THREE.RingGeometry(1, 2, 8), glow(0.9))
+    for (const mesh of [this.danger, this.edge]) {
+      mesh.rotation.x = -Math.PI / 2
+      mesh.position.y = 0.025
+      mesh.visible = false
+      this.scene.add(mesh)
+    }
     this.scene.add(this.stars())
     this.setRadius(10)
+  }
+
+  /**
+   * Marks the part of the floor that has shrunk away: a red zone between `floor` and the real edge,
+   * with a bright line at `floor`. Pass the full radius (or more) to hide it.
+   */
+  setFloor(floor: number, time: number): void {
+    const shown = floor < this.radius - 0.02
+    this.danger.visible = this.edge.visible = shown
+    if (!shown) { this.floor = Infinity; return }
+    if (Math.abs(floor - this.floor) > 0.03) {
+      this.floor = floor
+      this.danger.geometry.dispose()
+      this.edge.geometry.dispose()
+      this.danger.geometry = new THREE.RingGeometry(floor, this.radius, 96)
+      this.edge.geometry = new THREE.RingGeometry(Math.max(0.01, floor - 0.07), floor + 0.07, 96)
+    }
+    this.danger.material.opacity = 0.22 + Math.sin(time * 4) * 0.08
+    this.edge.material.opacity = 0.75 + Math.sin(time * 6) * 0.2
   }
 
   setRadius(radius: number): void {
     if (radius === this.radius) return
     this.radius = radius
+    this.floor = Infinity
     for (const child of [...this.disc.children]) {
       const mesh = child as THREE.Mesh
       mesh.geometry.dispose()

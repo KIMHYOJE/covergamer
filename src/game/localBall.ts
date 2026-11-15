@@ -22,10 +22,25 @@ export const HIT_WINDOW = 0.25
  * it to its own ball.
  */
 export const SKILLS = {
-  dash: { cooldown: 2.5, duration: 0.32, kick: 12, capScale: 1.8 },
-  guard: { cooldown: 6, duration: 1.3, soften: 0.25 },
+  // `ram`: a dashing ball hits this much harder and loses less speed itself (`recoil`).
+  dash: { cooldown: 2.5, duration: 0.45, kick: 12, capScale: 1.8, ram: 1.5, recoil: 0.55, minPush: 9 },
+  guard: { cooldown: 6, duration: 1.3, soften: 0.55 },
   blast: { cooldown: 7, radius: 5.5, power: 15, recoil: 3, firstCooldown: 3 },
 } as const
+/**
+ * The arena floor shrinks while a round is live: after `delay` seconds the edge moves in by `rate`
+ * metres per second down to `minRadius`. The ring-out line stays where the server put it. A ball on
+ * the shrunk-away part is not out: it is pulled toward the centre with `pull` m/s², weaker than a
+ * ball's own acceleration. Only a push over the real edge puts a ball out, never standing still.
+ */
+export const SHRINK = { delay: 8, rate: 0.2, minRadius: 5.5, pull: 9 } as const
+
+/** Floor radius `seconds` after the round went live. */
+export function floorRadius(arenaRadius: number, seconds: number): number {
+  const shrunk = arenaRadius - Math.max(0, seconds - SHRINK.delay) * SHRINK.rate
+  return Math.max(Math.min(SHRINK.minRadius, arenaRadius), shrunk)
+}
+
 /** Speed above the normal cap (after a bump or blast) fades at this rate per second. */
 const OVERSPEED_DECAY = 2.6
 /** No ball ever reports more than this multiple of `max_speed`; the server drops poses above twice it. */
@@ -89,7 +104,7 @@ export class OwnBall implements Motion {
   }
 
   /** One step of own movement against the balls of other seats. Returns the contacts to send. */
-  step(seconds: number, others: readonly { seat: Seat; ball: Motion }[]): Contact[] {
+  step(seconds: number, others: readonly { seat: Seat; ball: Motion }[], floor = Infinity): Contact[] {
     const dt = Math.min(Math.max(seconds, 0), MAX_STEP)
     this.clock += dt
     for (const kind of Object.keys(this.cooldown) as SkillKind[]) this.cooldown[kind] = Math.max(0, this.cooldown[kind] - dt)
@@ -97,6 +112,13 @@ export class OwnBall implements Motion {
     this.guardLeft = Math.max(0, this.guardLeft - dt)
     if (this.out) return []
     const cap = this.rules.max_speed * (this.dashLeft > 0 ? SKILLS.dash.capScale : 1)
+    // Off the shrunk floor but inside the edge: drift back toward the centre (no ring-out for standing still).
+    const distance = Math.hypot(this.x, this.z)
+    if (distance > floor && distance > 1e-3) {
+      const pull = SHRINK.pull * Math.min(1, 0.4 + (distance - floor) / 2)
+      this.vx -= (this.x / distance) * pull * dt
+      this.vz -= (this.z / distance) * pull * dt
+    }
     integrate(this, this.inputX, this.inputZ, dt, this.rules, cap)
     this.limit()
     const contacts: Contact[] = []
@@ -106,11 +128,15 @@ export class OwnBall implements Motion {
       if (!contact || this.recent(this.resolved, seat)) continue
       // Capped: the server drops a hit above twice the top speed.
       const impulse = Math.min(((1 + this.rules.restitution) * contact.closing) / 2, this.rules.max_speed * 1.9)
-      this.vx += impulse * contact.nx
-      this.vz += impulse * contact.nz
+      // A dashing ball rams: it keeps more of its own speed and pushes the other at least `minPush`.
+      const ram = this.dashLeft > 0
+      const recoil = ram ? SKILLS.dash.recoil : 1
+      const push = ram ? Math.min(Math.max(impulse * SKILLS.dash.ram, SKILLS.dash.minPush), this.rules.max_speed * 1.9) : impulse
+      this.vx += impulse * recoil * contact.nx
+      this.vz += impulse * recoil * contact.nz
       this.resolved.set(seat, this.clock)
       this.sent.set(seat, this.clock)
-      contacts.push({ seat, jx: -impulse * contact.nx, jz: -impulse * contact.nz, closing: contact.closing })
+      contacts.push({ seat, jx: -push * contact.nx, jz: -push * contact.nz, closing: contact.closing })
     }
     // Same test as the server referee, on the same unrounded numbers the pose carries.
     if (Math.hypot(this.x, this.z) > this.rules.arena_radius) this.out = true

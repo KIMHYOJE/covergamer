@@ -8,13 +8,15 @@ import { BallView, RemoteTrack, SEAT_COLORS } from './balls'
 import { ArenaCamera, cameraSide } from './camera'
 import { CONFIG } from './config'
 import { Effects } from './fx'
-import { OwnBall, SKILLS, type Motion } from './localBall'
+import { floorRadius, OwnBall, SHRINK, SKILLS, type Motion } from './localBall'
 
 export type Mode = 'attract' | 'online'
 
 export type GameHooks = {
   /** A new server event (round start, ring-out, point, match end) for the HUD. */
   event(kind: EventKind, state: RoomState): void
+  /** The arena starts shrinking. */
+  shrink(): void
 }
 
 /** The own ball as `main.ts` publishes it. `urgent` asks for a pose now (after a bump or the edge). */
@@ -58,6 +60,9 @@ export class Game {
   private hits: OutgoingHit[] = []
   private ownFell = false
   private bumpCooldown = 0
+  /** When the current round went live on this client (ms), 0 outside a live round. */
+  private liveSince = 0
+  private shrinkNotified = false
   private skills: OutgoingSkill[] = []
   private readonly remoteFx = Object.fromEntries(SEATS.map(seat => [seat, { dash: 0, guard: 0 }])) as Record<Seat, { dash: number; guard: number }>
   private readonly trailClock = Object.fromEntries(SEATS.map(seat => [seat, 0])) as Record<Seat, number>
@@ -109,6 +114,11 @@ export class Game {
     this.phaseEndsAt = nowMs + state.phase_ends_in_ms
     const previous = this.state
     this.state = state
+    if (state.phase !== 'live') this.liveSince = 0
+    else if (previous?.phase !== 'live' || previous.round !== state.round || !this.liveSince) {
+      this.liveSince = nowMs
+      this.shrinkNotified = false
+    }
     // Each round starts from the spawns, and so does the wait after a void round.
     if (state.round !== this.round || (state.phase === 'waiting' && previous?.phase !== 'waiting')) this.placeAll()
     this.round = state.round
@@ -226,13 +236,20 @@ export class Game {
     })
   }
 
+  /** The floor radius now: the full arena until the shrink starts, outside a live round always full. */
+  floor(): number {
+    const full = this.rules?.arena_radius ?? 10
+    if (this.mode !== 'online' || this.state?.phase !== 'live' || !this.liveSince) return full
+    return floorRadius(full, (performance.now() - this.liveSince) / 1000)
+  }
+
   step(dt: number): void {
     this.bumpCooldown = Math.max(0, this.bumpCooldown - dt)
     if (this.mode !== 'online' || !this.ownsLiveBall()) return
     const others = SEATS.filter(seat => seat !== this.role && this.inPlay(seat)).map(seat => ({ seat, ball: this.remote[seat] }))
     const wasOut = this.own.out
     const round = this.state!.round
-    for (const contact of this.own.step(dt, others)) {
+    for (const contact of this.own.step(dt, others, this.floor())) {
       this.urgent = true
       this.hits.push({ to: contact.seat, round, jx: contact.jx, jz: contact.jz })
       if (contact.closing >= BUMP_EFFECT_SPEED) this.bumpEffects(this.remote[contact.seat], contact.closing)
@@ -276,6 +293,12 @@ export class Game {
       }
       this.cam.update(own, frameSeconds, this.reducedMotion)
       this.countdownBeep(state)
+    }
+    const floor = this.floor()
+    this.arena.setFloor(floor, this.time)
+    if (!this.shrinkNotified && this.liveSince && performance.now() - this.liveSince >= SHRINK.delay * 1000) {
+      this.shrinkNotified = true
+      this.hooks.shrink()
     }
     this.fx.update(frameSeconds)
     this.renderer.render(this.arena.scene, this.cam.camera)

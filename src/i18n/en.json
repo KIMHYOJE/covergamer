@@ -61,5 +61,7 @@
   "credits.fonts": "Fonts: ManusCC0, ManusCC0 Sans CJK SC (CC0 1.0)",
   "skill.dash": "Dash",
   "skill.guard": "Guard",
-  "skill.blast": "Blast"
+  "skill.blast": "Blast",
+  "status.shrink": "ARENA SHRINKING!",
+  "status.shrink.sub": "The red zone pushes you toward the centre"
 }
